@@ -1,1 +1,5 @@
 raw_data/
+node_modules/
+dist-electron
+backend/venv
+.DS_Store/
