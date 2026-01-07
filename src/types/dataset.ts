@@ -51,3 +51,12 @@ export interface VirtualImageResponse {
   width: number
   height: number
 }
+
+/** Response from the diffraction pattern endpoint. */
+export interface DiffractionPatternResponse {
+  image_base64: string
+  width: number
+  height: number
+  x: number
+  y: number
+}

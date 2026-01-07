@@ -7,6 +7,7 @@ import type {
   DatasetInfo,
   MeanDiffractionResponse,
   VirtualImageResponse,
+  DiffractionPatternResponse,
 } from './types/dataset'
 
 const BACKEND_URL = 'http://127.0.0.1:8000'
@@ -31,6 +32,17 @@ function App() {
   // Clicked position in real space (image coordinates)
   const [clickedPosition, setClickedPosition] = useState<{ x: number; y: number } | null>(null)
   const realSpaceImageRef = useRef<HTMLImageElement>(null)
+
+  // Diffraction pattern at clicked position
+  const [diffractionPattern, setDiffractionPattern] = useState<DiffractionPatternResponse | null>(null)
+
+  // Sidebar state
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
+
+  // Display controls (placeholder state - not yet functional)
+  const [logScale, setLogScale] = useState(false)
+  const [contrastMin, setContrastMin] = useState(0)
+  const [contrastMax, setContrastMax] = useState(100)
 
   /**
    * Probe a file to determine its structure.
@@ -83,8 +95,17 @@ function App() {
   /**
    * Fetch the mean diffraction pattern for the currently loaded dataset.
    */
-  const fetchMeanDiffraction = useCallback(async (): Promise<MeanDiffractionResponse> => {
-    const response = await fetch(`${BACKEND_URL}/dataset/diffraction/mean`)
+  const fetchMeanDiffraction = useCallback(async (
+    logScale: boolean = false,
+    contrastMinVal: number = 0,
+    contrastMaxVal: number = 100
+  ): Promise<MeanDiffractionResponse> => {
+    const params = new URLSearchParams({
+      log_scale: String(logScale),
+      contrast_min: String(contrastMinVal),
+      contrast_max: String(contrastMaxVal),
+    })
+    const response = await fetch(`${BACKEND_URL}/dataset/diffraction/mean?${params}`)
 
     if (!response.ok) {
       const errorData = await response.json()
@@ -99,11 +120,46 @@ function App() {
    */
   const fetchVirtualImage = useCallback(async (
     inner: number = 0,
-    outer: number = 20
+    outer: number = 20,
+    logScale: boolean = false,
+    contrastMinVal: number = 0,
+    contrastMaxVal: number = 100
   ): Promise<VirtualImageResponse> => {
-    const response = await fetch(
-      `${BACKEND_URL}/dataset/virtual-image?inner=${inner}&outer=${outer}`
-    )
+    const params = new URLSearchParams({
+      inner: String(inner),
+      outer: String(outer),
+      log_scale: String(logScale),
+      contrast_min: String(contrastMinVal),
+      contrast_max: String(contrastMaxVal),
+    })
+    const response = await fetch(`${BACKEND_URL}/dataset/virtual-image?${params}`)
+
+    if (!response.ok) {
+      const errorData = await response.json()
+      throw new Error(errorData.detail || `HTTP ${response.status}`)
+    }
+
+    return response.json()
+  }, [])
+
+  /**
+   * Fetch the diffraction pattern at a specific scan position.
+   */
+  const fetchDiffractionPattern = useCallback(async (
+    x: number,
+    y: number,
+    logScale: boolean = false,
+    contrastMinVal: number = 0,
+    contrastMaxVal: number = 100
+  ): Promise<DiffractionPatternResponse> => {
+    const params = new URLSearchParams({
+      x: String(x),
+      y: String(y),
+      log_scale: String(logScale),
+      contrast_min: String(contrastMinVal),
+      contrast_max: String(contrastMaxVal),
+    })
+    const response = await fetch(`${BACKEND_URL}/dataset/diffraction?${params}`)
 
     if (!response.ok) {
       const errorData = await response.json()
@@ -115,9 +171,9 @@ function App() {
 
   /**
    * Handle click on the real space image.
-   * Converts click position to image coordinates.
+   * Converts click position to image coordinates and fetches diffraction pattern.
    */
-  const handleRealSpaceClick = useCallback((event: React.MouseEvent<HTMLImageElement>) => {
+  const handleRealSpaceClick = useCallback(async (event: React.MouseEvent<HTMLImageElement>) => {
     const img = realSpaceImageRef.current
     if (!img || !virtualImage) return
 
@@ -161,7 +217,15 @@ function App() {
     const imageY = Math.round(((clickY - offsetY) / displayedHeight) * virtualImage.height)
 
     setClickedPosition({ x: imageX, y: imageY })
-  }, [virtualImage])
+
+    // Fetch diffraction pattern at clicked position
+    try {
+      const pattern = await fetchDiffractionPattern(imageX, imageY, logScale, contrastMin, contrastMax)
+      setDiffractionPattern(pattern)
+    } catch (err) {
+      console.error('Failed to fetch diffraction pattern:', err)
+    }
+  }, [virtualImage, fetchDiffractionPattern, logScale, contrastMin, contrastMax])
 
   /**
    * Handle file selection from Electron.
@@ -173,6 +237,7 @@ function App() {
     setMeanDiffraction(null)
     setVirtualImage(null)
     setClickedPosition(null)
+    setDiffractionPattern(null)
     setError(null)
     setShowPicker(false)
     setIsLoading(true)
@@ -186,8 +251,8 @@ function App() {
         setDatasetInfo(info)
         // Fetch images in parallel
         const [diffraction, virtual] = await Promise.all([
-          fetchMeanDiffraction(),
-          fetchVirtualImage(),
+          fetchMeanDiffraction(logScale, contrastMin, contrastMax),
+          fetchVirtualImage(0, 20, logScale, contrastMin, contrastMax),
         ])
         setMeanDiffraction(diffraction)
         setVirtualImage(virtual)
@@ -201,8 +266,8 @@ function App() {
           setDatasetInfo(info)
           // Fetch images in parallel
           const [diffraction, virtual] = await Promise.all([
-            fetchMeanDiffraction(),
-            fetchVirtualImage(),
+            fetchMeanDiffraction(logScale, contrastMin, contrastMax),
+            fetchVirtualImage(0, 20, logScale, contrastMin, contrastMax),
           ])
           setMeanDiffraction(diffraction)
           setVirtualImage(virtual)
@@ -212,8 +277,8 @@ function App() {
           setDatasetInfo(info)
           // Fetch images in parallel
           const [diffraction, virtual] = await Promise.all([
-            fetchMeanDiffraction(),
-            fetchVirtualImage(),
+            fetchMeanDiffraction(logScale, contrastMin, contrastMax),
+            fetchVirtualImage(0, 20, logScale, contrastMin, contrastMax),
           ])
           setMeanDiffraction(diffraction)
           setVirtualImage(virtual)
@@ -231,7 +296,7 @@ function App() {
     } finally {
       setIsLoading(false)
     }
-  }, [probeFile, loadDataset, fetchMeanDiffraction, fetchVirtualImage])
+  }, [probeFile, loadDataset, fetchMeanDiffraction, fetchVirtualImage, logScale, contrastMin, contrastMax])
 
   /**
    * Handle dataset selection from the picker modal.
@@ -250,8 +315,8 @@ function App() {
       setDatasetInfo(info)
       // Fetch images in parallel
       const [diffraction, virtual] = await Promise.all([
-        fetchMeanDiffraction(),
-        fetchVirtualImage(),
+        fetchMeanDiffraction(logScale, contrastMin, contrastMax),
+        fetchVirtualImage(0, 20, logScale, contrastMin, contrastMax),
       ])
       setMeanDiffraction(diffraction)
       setVirtualImage(virtual)
@@ -262,7 +327,41 @@ function App() {
       setPendingFilePath(null)
       setHdf5Datasets([])
     }
-  }, [pendingFilePath, loadDataset, fetchMeanDiffraction, fetchVirtualImage])
+  }, [pendingFilePath, loadDataset, fetchMeanDiffraction, fetchVirtualImage, logScale, contrastMin, contrastMax])
+
+  /**
+   * Refetch images when display settings change.
+   */
+  useEffect(() => {
+    if (!datasetInfo) return
+
+    const refetchImages = async () => {
+      try {
+        // Refetch virtual image
+        const virtual = await fetchVirtualImage(0, 20, logScale, contrastMin, contrastMax)
+        setVirtualImage(virtual)
+
+        // Refetch diffraction (either mean or at clicked position)
+        if (clickedPosition) {
+          const pattern = await fetchDiffractionPattern(
+            clickedPosition.x,
+            clickedPosition.y,
+            logScale,
+            contrastMin,
+            contrastMax
+          )
+          setDiffractionPattern(pattern)
+        } else {
+          const mean = await fetchMeanDiffraction(logScale, contrastMin, contrastMax)
+          setMeanDiffraction(mean)
+        }
+      } catch (err) {
+        console.error('Failed to refetch images:', err)
+      }
+    }
+
+    refetchImages()
+  }, [logScale, contrastMin, contrastMax]) // Only refetch when display settings change
 
   /**
    * Handle picker modal cancel.
@@ -310,8 +409,81 @@ function App() {
   return (
     <div className="app">
       <div className="menu-bar" />
-      <div className="main-content">
-        <div className="panel real-space">
+      <div className="app-body">
+        {/* Collapsible Sidebar */}
+        <div className={`sidebar ${sidebarCollapsed ? 'collapsed' : ''}`}>
+          <button
+            className="sidebar-toggle"
+            onClick={() => setSidebarCollapsed(!sidebarCollapsed)}
+            title={sidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+          >
+            {sidebarCollapsed ? '›' : '‹'}
+          </button>
+          {!sidebarCollapsed && (
+            <div className="sidebar-content">
+              <div className="sidebar-section">
+                <h3 className="sidebar-section-title">Display</h3>
+                <div className="sidebar-control">
+                  <label className="checkbox-label">
+                    <input
+                      type="checkbox"
+                      checked={logScale}
+                      onChange={(e) => setLogScale(e.target.checked)}
+                    />
+                    Log scale
+                  </label>
+                </div>
+                <div className="sidebar-control">
+                  <label className="slider-label">Contrast</label>
+                  <div className="contrast-sliders">
+                    <div className="slider-row">
+                      <span className="slider-label-small">Min</span>
+                      <input
+                        type="range"
+                        min="0"
+                        max="100"
+                        value={contrastMin}
+                        onChange={(e) => {
+                          const newMin = Number(e.target.value)
+                          setContrastMin(newMin)
+                          // Ensure max stays above min
+                          if (newMin >= contrastMax) {
+                            setContrastMax(Math.min(100, newMin + 1))
+                          }
+                        }}
+                        className="slider"
+                      />
+                      <span className="slider-value">{contrastMin}</span>
+                    </div>
+                    <div className="slider-row">
+                      <span className="slider-label-small">Max</span>
+                      <input
+                        type="range"
+                        min="0"
+                        max="100"
+                        value={contrastMax}
+                        onChange={(e) => {
+                          const newMax = Number(e.target.value)
+                          setContrastMax(newMax)
+                          // Ensure min stays below max
+                          if (newMax <= contrastMin) {
+                            setContrastMin(Math.max(0, newMax - 1))
+                          }
+                        }}
+                        className="slider"
+                      />
+                      <span className="slider-value">{contrastMax}</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* Main Content */}
+        <div className="main-content">
+          <div className="panel real-space">
           <span className="panel-label">Real Space</span>
           {virtualImage && (
             <div style={{ position: 'relative', display: 'inline-block' }}>
@@ -364,10 +536,10 @@ function App() {
         <div className="panel-divider" />
         <div className="panel reciprocal-space">
           <span className="panel-label">Reciprocal Space</span>
-          {meanDiffraction && (
+          {(diffractionPattern || meanDiffraction) && (
             <img
-              src={`data:image/png;base64,${meanDiffraction.image_base64}`}
-              alt="Mean diffraction pattern"
+              src={`data:image/png;base64,${(diffractionPattern || meanDiffraction)!.image_base64}`}
+              alt={diffractionPattern ? 'Diffraction pattern' : 'Mean diffraction pattern'}
               style={{
                 maxWidth: '100%',
                 maxHeight: '100%',
@@ -375,6 +547,7 @@ function App() {
               }}
             />
           )}
+          </div>
         </div>
       </div>
       <div className="status-bar">
