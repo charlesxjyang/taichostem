@@ -53,10 +53,20 @@ function App() {
   const [contrastMax, setContrastMax] = useState(100)
 
   // Detector controls
-  const [detectorType, setDetectorType] = useState<'bf' | 'adf'>('bf')
+  const [detectorType, setDetectorType] = useState<'none' | 'bf' | 'abf' | 'adf'>('bf')
   const [bfRadius, setBfRadius] = useState(20)
-  const [adfInner, setAdfInner] = useState(20)
-  const [adfOuter, setAdfOuter] = useState(60)
+  const [abfInner, setAbfInner] = useState(22)
+  const [abfOuter, setAbfOuter] = useState(35)
+  const [adfInner, setAdfInner] = useState(40)
+  const [adfOuter, setAdfOuter] = useState(80)
+
+  // Detector overlay settings (advanced, in workflow panel)
+  const [showDetectorOverlay, setShowDetectorOverlay] = useState(true)
+  const [overlayOpacity, setOverlayOpacity] = useState(50)
+  const [overlayColor, setOverlayColor] = useState<'auto' | 'yellow' | 'cyan' | 'green' | 'orange' | 'magenta'>('auto')
+  const [centerOffsetX, setCenterOffsetX] = useState(0)
+  const [centerOffsetY, setCenterOffsetY] = useState(0)
+  const [pickingCenter, setPickingCenter] = useState(false)
 
   // Workflow panel state
   const [workflowCollapsed, setWorkflowCollapsed] = useState(false)
@@ -71,6 +81,18 @@ function App() {
   const [atomDetectionError, setAtomDetectionError] = useState<string | null>(null)
   const [atomPositions, setAtomPositions] = useState<[number, number][]>([])
   const [showAtomOverlay, setShowAtomOverlay] = useState(true)
+
+  // Filter hot pixels dialog state
+  const [showFilterHotPixelsDialog, setShowFilterHotPixelsDialog] = useState(false)
+  const [filterHotPixelsThresh, setFilterHotPixelsThresh] = useState(8)
+  const [filterHotPixelsLoading, setFilterHotPixelsLoading] = useState(false)
+
+  // Calibration state
+  const [calibrationCollapsed, setCalibrationCollapsed] = useState(false)
+  const [qPixelSize, setQPixelSize] = useState(1.0)
+  const [qPixelUnits, setQPixelUnits] = useState('1/Å')
+  const [rPixelSize, setRPixelSize] = useState(1.0)
+  const [rPixelUnits, setRPixelUnits] = useState('Å')
 
   /**
    * Probe a file to determine its structure.
@@ -223,6 +245,47 @@ function App() {
   }, [])
 
   /**
+   * Fetch calibration values from the backend.
+   */
+  const fetchCalibration = useCallback(async () => {
+    try {
+      const response = await fetch(`${BACKEND_URL}/dataset/calibration`)
+      if (response.ok) {
+        const data = await response.json()
+        setQPixelSize(data.q_pixel_size)
+        setQPixelUnits(data.q_pixel_units)
+        setRPixelSize(data.r_pixel_size)
+        setRPixelUnits(data.r_pixel_units)
+      }
+    } catch (err) {
+      console.error('Failed to fetch calibration:', err)
+    }
+  }, [])
+
+  /**
+   * Update calibration values on the backend.
+   */
+  const updateCalibration = useCallback(async (updates: {
+    q_pixel_size?: number
+    q_pixel_units?: string
+    r_pixel_size?: number
+    r_pixel_units?: string
+  }) => {
+    try {
+      const response = await fetch(`${BACKEND_URL}/dataset/calibration`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(updates),
+      })
+      if (!response.ok) {
+        console.error('Failed to update calibration')
+      }
+    } catch (err) {
+      console.error('Failed to update calibration:', err)
+    }
+  }, [])
+
+  /**
    * Handle click on the real space image.
    * Converts click position to image coordinates and fetches diffraction pattern.
    */
@@ -348,6 +411,7 @@ function App() {
         ])
         setMeanDiffraction(diffraction)
         setVirtualImage(virtual)
+        fetchCalibration()
       } else if (probeResult.type === 'hdf5_tree') {
         // HDF5 file - check if we need to show picker
         const datasets4d = probeResult.datasets.filter(d => d.is_4d)
@@ -363,6 +427,7 @@ function App() {
           ])
           setMeanDiffraction(diffraction)
           setVirtualImage(virtual)
+          fetchCalibration()
         } else if (probeResult.datasets.length === 1) {
           // Only one dataset total - load it directly
           const info = await loadDataset(filePath, probeResult.datasets[0].path)
@@ -374,6 +439,7 @@ function App() {
           ])
           setMeanDiffraction(diffraction)
           setVirtualImage(virtual)
+          fetchCalibration()
         } else if (probeResult.datasets.length > 1) {
           // Multiple datasets - show picker
           setPendingFilePath(filePath)
@@ -388,7 +454,7 @@ function App() {
     } finally {
       setIsLoading(false)
     }
-  }, [probeFile, loadDataset, fetchMeanDiffraction, fetchVirtualImage, logScale, contrastMin, contrastMax, detectorType, bfRadius, adfInner, adfOuter])
+  }, [probeFile, loadDataset, fetchMeanDiffraction, fetchVirtualImage, fetchCalibration, logScale, contrastMin, contrastMax, detectorType, bfRadius, adfInner, adfOuter])
 
   /**
    * Handle dataset selection from the picker modal.
@@ -415,6 +481,7 @@ function App() {
       ])
       setMeanDiffraction(diffraction)
       setVirtualImage(virtual)
+      fetchCalibration()
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load dataset')
     } finally {
@@ -422,18 +489,56 @@ function App() {
       setPendingFilePath(null)
       setHdf5Datasets([])
     }
-  }, [pendingFilePath, loadDataset, fetchMeanDiffraction, fetchVirtualImage, logScale, contrastMin, contrastMax, detectorType, bfRadius, adfInner, adfOuter])
+  }, [pendingFilePath, loadDataset, fetchMeanDiffraction, fetchVirtualImage, fetchCalibration, logScale, contrastMin, contrastMax, detectorType, bfRadius, adfInner, adfOuter])
 
   /**
    * Compute detector inner/outer radii based on current settings.
    */
   const getDetectorRadii = useCallback(() => {
-    if (detectorType === 'bf') {
+    if (detectorType === 'none' || detectorType === 'bf') {
       return { inner: 0, outer: bfRadius }
+    } else if (detectorType === 'abf') {
+      return { inner: abfInner, outer: abfOuter }
     } else {
       return { inner: adfInner, outer: adfOuter }
     }
-  }, [detectorType, bfRadius, adfInner, adfOuter])
+  }, [detectorType, bfRadius, abfInner, abfOuter, adfInner, adfOuter])
+
+  /**
+   * Get the effective detector type for API calls (maps 'none' to 'bf').
+   */
+  const getEffectiveDetectorType = useCallback(() => {
+    return detectorType === 'none' ? 'bf' : detectorType
+  }, [detectorType])
+
+  /**
+   * Get the overlay fill color based on detector type and user preference.
+   */
+  const getOverlayColor = useCallback(() => {
+    if (overlayColor !== 'auto') {
+      const colorMap: Record<string, { fill: string; stroke: string }> = {
+        yellow: { fill: 'rgba(255, 220, 0, VAR)', stroke: 'rgba(255, 220, 0, 0.8)' },
+        cyan: { fill: 'rgba(0, 162, 255, VAR)', stroke: 'rgba(0, 162, 255, 0.8)' },
+        green: { fill: 'rgba(0, 200, 150, VAR)', stroke: 'rgba(0, 200, 150, 0.8)' },
+        orange: { fill: 'rgba(255, 162, 0, VAR)', stroke: 'rgba(255, 162, 0, 0.8)' },
+        magenta: { fill: 'rgba(255, 0, 200, VAR)', stroke: 'rgba(255, 0, 200, 0.8)' },
+      }
+      const opacity = overlayOpacity / 100 * 0.5 // Scale to max 0.5 fill opacity
+      return {
+        fill: colorMap[overlayColor].fill.replace('VAR', String(opacity)),
+        stroke: colorMap[overlayColor].stroke,
+      }
+    }
+    // Auto colors based on detector type
+    const opacity = overlayOpacity / 100 * 0.5
+    if (detectorType === 'bf') {
+      return { fill: `rgba(0, 162, 255, ${opacity})`, stroke: 'rgba(0, 162, 255, 0.8)' }
+    } else if (detectorType === 'abf') {
+      return { fill: `rgba(0, 200, 150, ${opacity})`, stroke: 'rgba(0, 200, 150, 0.8)' }
+    } else {
+      return { fill: `rgba(255, 162, 0, ${opacity})`, stroke: 'rgba(255, 162, 0, 0.8)' }
+    }
+  }, [overlayColor, overlayOpacity, detectorType])
 
   /**
    * Refetch images when display settings change.
@@ -485,7 +590,8 @@ function App() {
     detectorDebounceRef.current = setTimeout(async () => {
       try {
         const { inner, outer } = getDetectorRadii()
-        const virtual = await fetchVirtualImage(detectorType, inner, outer, logScale, contrastMin, contrastMax)
+        const effectiveType = getEffectiveDetectorType()
+        const virtual = await fetchVirtualImage(effectiveType, inner, outer, logScale, contrastMin, contrastMax)
         setVirtualImage(virtual)
       } catch (err) {
         console.error('Failed to refetch virtual image:', err)
@@ -497,7 +603,7 @@ function App() {
         clearTimeout(detectorDebounceRef.current)
       }
     }
-  }, [detectorType, bfRadius, adfInner, adfOuter, getDetectorRadii, fetchVirtualImage, logScale, contrastMin, contrastMax, datasetInfo])
+  }, [detectorType, bfRadius, abfInner, abfOuter, adfInner, adfOuter, getDetectorRadii, getEffectiveDetectorType, fetchVirtualImage, logScale, contrastMin, contrastMax, datasetInfo])
 
   /**
    * Handle picker modal cancel.
@@ -534,9 +640,12 @@ function App() {
     if (result.success && result.config) {
       const { type, inner, outer } = result.config
       setDetectorType(type)
-      if (type === 'bf') {
+      if (type === 'none' || type === 'bf') {
         setBfRadius(outer)
-      } else {
+      } else if (type === 'abf') {
+        setAbfInner(inner)
+        setAbfOuter(outer)
+      } else if (type === 'adf') {
         setAdfInner(inner)
         setAdfOuter(outer)
       }
@@ -561,6 +670,37 @@ function App() {
       console.error('Failed to export CSV:', result.error)
     }
   }, [atomPositions])
+
+  /**
+   * Export the current virtual image as PNG.
+   */
+  const handleExportVirtualImage = useCallback(async () => {
+    if (!virtualImage) return
+
+    // Convert base64 to blob and save
+    const result = await window.electronAPI.saveImage(
+      virtualImage.image_base64,
+      `virtual-${detectorType}.png`
+    )
+    if (!result.success && !result.canceled) {
+      console.error('Failed to export virtual image:', result.error)
+    }
+  }, [virtualImage, detectorType])
+
+  /**
+   * Calculate detector statistics from the current diffraction pattern.
+   */
+  const getDetectorStats = useCallback(() => {
+    if (!virtualImage) return null
+    const { inner, outer } = getDetectorRadii()
+    // Approximate detector area in pixels (area of annulus)
+    const area = Math.PI * (outer * outer - inner * inner)
+    return {
+      area: Math.round(area),
+      inner,
+      outer,
+    }
+  }, [virtualImage, getDetectorRadii])
 
   /**
    * Run atom detection on the current virtual image.
@@ -601,6 +741,68 @@ function App() {
     }
   }, [atomThreshold, atomMinDistance, atomGaussianRefinement])
 
+  /**
+   * Run hot pixel filtering on the current dataset.
+   */
+  const handleFilterHotPixels = useCallback(async () => {
+    setFilterHotPixelsLoading(true)
+
+    try {
+      const response = await fetch(`${BACKEND_URL}/dataset/preprocess/filter-hot-pixels`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ thresh: filterHotPixelsThresh }),
+      })
+
+      if (!response.ok) {
+        const errorData = await response.json()
+        throw new Error(errorData.detail || `HTTP ${response.status}`)
+      }
+
+      // Close dialog
+      setShowFilterHotPixelsDialog(false)
+
+      // Refresh visualizations
+      const { inner, outer } = getDetectorRadii()
+      const effectiveType = getEffectiveDetectorType()
+
+      // Refetch all images
+      const [diffraction, virtual] = await Promise.all([
+        fetchMeanDiffraction(logScale, contrastMin, contrastMax),
+        fetchVirtualImage(effectiveType, inner, outer, logScale, contrastMin, contrastMax),
+      ])
+
+      setMeanDiffraction(diffraction)
+      setVirtualImage(virtual)
+
+      // Clear cached patterns so they get refreshed
+      setCachedMeanDiffraction(null)
+      setCachedMaxDiffraction(null)
+
+      // Clear clicked position diffraction (will be refetched on next click)
+      if (clickedPosition) {
+        const pattern = await fetchDiffractionPattern(
+          clickedPosition.x,
+          clickedPosition.y,
+          logScale,
+          contrastMin,
+          contrastMax
+        )
+        setDiffractionPattern(pattern)
+      }
+
+      // Clear atom positions since the data changed
+      setAtomPositions([])
+      setAtomDetectionResult(null)
+
+    } catch (err) {
+      console.error('Failed to filter hot pixels:', err)
+      setError(err instanceof Error ? err.message : 'Failed to filter hot pixels')
+    } finally {
+      setFilterHotPixelsLoading(false)
+    }
+  }, [filterHotPixelsThresh, getDetectorRadii, getEffectiveDetectorType, fetchMeanDiffraction, fetchVirtualImage, fetchDiffractionPattern, logScale, contrastMin, contrastMax, clickedPosition])
+
   useEffect(() => {
     window.electronAPI.onFileSelected(handleFileSelected)
 
@@ -608,6 +810,19 @@ function App() {
       window.electronAPI.removeFileSelectedListener()
     }
   }, [handleFileSelected])
+
+  // Listen for filter hot pixels dialog trigger from menu
+  useEffect(() => {
+    window.electronAPI.onShowFilterHotPixelsDialog(() => {
+      if (datasetInfo) {
+        setShowFilterHotPixelsDialog(true)
+      }
+    })
+
+    return () => {
+      window.electronAPI.removeFilterHotPixelsDialogListener()
+    }
+  }, [datasetInfo])
 
   const filename = currentFile ? currentFile.split('/').pop() ?? currentFile : null
 
@@ -710,8 +925,8 @@ function App() {
               <div className="sidebar-section">
                 <h3 className="sidebar-section-title">Detector</h3>
                 <div className="sidebar-control">
-                  <div className="radio-group">
-                    <label className="radio-label">
+                  <div className="radio-group detector-radio-group">
+                    <label className="radio-label" title="Bright Field - center disk">
                       <input
                         type="radio"
                         name="detector"
@@ -721,7 +936,17 @@ function App() {
                       />
                       BF
                     </label>
-                    <label className="radio-label">
+                    <label className="radio-label" title="Annular Bright Field - just outside BF">
+                      <input
+                        type="radio"
+                        name="detector"
+                        value="abf"
+                        checked={detectorType === 'abf'}
+                        onChange={() => setDetectorType('abf')}
+                      />
+                      ABF
+                    </label>
+                    <label className="radio-label" title="Annular Dark Field - outer ring">
                       <input
                         type="radio"
                         name="detector"
@@ -730,15 +955,6 @@ function App() {
                         onChange={() => setDetectorType('adf')}
                       />
                       ADF
-                    </label>
-                    <label className="radio-label disabled">
-                      <input
-                        type="radio"
-                        name="detector"
-                        value="custom"
-                        disabled
-                      />
-                      Custom
                     </label>
                   </div>
                 </div>
@@ -756,6 +972,49 @@ function App() {
                         className="slider"
                       />
                       <span className="slider-value">{bfRadius}</span>
+                    </div>
+                  </div>
+                )}
+
+                {detectorType === 'abf' && (
+                  <div className="sidebar-control">
+                    <div className="contrast-sliders">
+                      <div className="slider-row">
+                        <span className="slider-label-small">Inner</span>
+                        <input
+                          type="range"
+                          min="0"
+                          max="100"
+                          value={abfInner}
+                          onChange={(e) => {
+                            const newInner = Number(e.target.value)
+                            setAbfInner(newInner)
+                            if (newInner >= abfOuter) {
+                              setAbfOuter(Math.min(100, newInner + 1))
+                            }
+                          }}
+                          className="slider"
+                        />
+                        <span className="slider-value">{abfInner}</span>
+                      </div>
+                      <div className="slider-row">
+                        <span className="slider-label-small">Outer</span>
+                        <input
+                          type="range"
+                          min="1"
+                          max="100"
+                          value={abfOuter}
+                          onChange={(e) => {
+                            const newOuter = Number(e.target.value)
+                            setAbfOuter(newOuter)
+                            if (newOuter <= abfInner) {
+                              setAbfInner(Math.max(0, newOuter - 1))
+                            }
+                          }}
+                          className="slider"
+                        />
+                        <span className="slider-value">{abfOuter}</span>
+                      </div>
                     </div>
                   </div>
                 )}
@@ -802,15 +1061,89 @@ function App() {
                     </div>
                   </div>
                 )}
+              </div>
 
-                <div className="config-buttons">
-                  <button className="config-button" onClick={handleSaveConfig}>
-                    Save Config
-                  </button>
-                  <button className="config-button" onClick={handleLoadConfig}>
-                    Load Config
-                  </button>
+              {/* Calibration Section */}
+              <div className="sidebar-section">
+                <div
+                  className="sidebar-section-header"
+                  onClick={() => setCalibrationCollapsed(!calibrationCollapsed)}
+                >
+                  <h3 className="sidebar-section-title">Calibration</h3>
+                  <span className="sidebar-collapse-icon">
+                    {calibrationCollapsed ? '+' : '−'}
+                  </span>
                 </div>
+                {!calibrationCollapsed && (
+                  <div className="calibration-content">
+                    <div className="calibration-group">
+                      <label className="calibration-label">Q (Reciprocal)</label>
+                      <div className="calibration-row">
+                        <input
+                          type="number"
+                          className="calibration-input"
+                          value={qPixelSize}
+                          onChange={(e) => {
+                            const val = Number(e.target.value)
+                            if (val > 0) {
+                              setQPixelSize(val)
+                              updateCalibration({ q_pixel_size: val })
+                            }
+                          }}
+                          step="0.001"
+                          min="0.001"
+                          disabled={!datasetInfo}
+                        />
+                        <select
+                          className="calibration-select"
+                          value={qPixelUnits}
+                          onChange={(e) => {
+                            setQPixelUnits(e.target.value)
+                            updateCalibration({ q_pixel_units: e.target.value })
+                          }}
+                          disabled={!datasetInfo}
+                        >
+                          <option value="1/Å">1/Å</option>
+                          <option value="1/nm">1/nm</option>
+                          <option value="mrad">mrad</option>
+                        </select>
+                      </div>
+                    </div>
+                    <div className="calibration-group">
+                      <label className="calibration-label">R (Real Space)</label>
+                      <div className="calibration-row">
+                        <input
+                          type="number"
+                          className="calibration-input"
+                          value={rPixelSize}
+                          onChange={(e) => {
+                            const val = Number(e.target.value)
+                            if (val > 0) {
+                              setRPixelSize(val)
+                              updateCalibration({ r_pixel_size: val })
+                            }
+                          }}
+                          step="0.001"
+                          min="0.001"
+                          disabled={!datasetInfo}
+                        />
+                        <select
+                          className="calibration-select"
+                          value={rPixelUnits}
+                          onChange={(e) => {
+                            setRPixelUnits(e.target.value)
+                            updateCalibration({ r_pixel_units: e.target.value })
+                          }}
+                          disabled={!datasetInfo}
+                        >
+                          <option value="Å">Å</option>
+                          <option value="nm">nm</option>
+                          <option value="pm">pm</option>
+                        </select>
+                      </div>
+                    </div>
+                  </div>
+                )}
               </div>
             </div>
           )}
@@ -861,20 +1194,20 @@ function App() {
                       {clickedPosition && (
                         <>
                           <line
-                            x1={clickedPosition.x - 8}
+                            x1={clickedPosition.x - 4}
                             y1={clickedPosition.y}
-                            x2={clickedPosition.x + 8}
+                            x2={clickedPosition.x + 4}
                             y2={clickedPosition.y}
                             stroke="#00ff00"
-                            strokeWidth="2"
+                            strokeWidth="1"
                           />
                           <line
                             x1={clickedPosition.x}
-                            y1={clickedPosition.y - 8}
+                            y1={clickedPosition.y - 4}
                             x2={clickedPosition.x}
-                            y2={clickedPosition.y + 8}
+                            y2={clickedPosition.y + 4}
                             stroke="#00ff00"
-                            strokeWidth="2"
+                            strokeWidth="1"
                           />
                         </>
                       )}
@@ -930,55 +1263,95 @@ function App() {
                         viewBox={`0 0 ${pattern.width} ${pattern.height}`}
                         preserveAspectRatio="xMidYMid meet"
                       >
-                        {detectorType === 'bf' ? (
-                          // BF: filled semi-transparent circle
-                          <circle
-                            cx={pattern.width / 2}
-                            cy={pattern.height / 2}
-                            r={bfRadius}
-                            fill="rgba(0, 162, 255, 0.3)"
-                            stroke="rgba(0, 162, 255, 0.8)"
-                            strokeWidth="1"
-                          />
-                        ) : (
-                          // ADF: semi-transparent annulus (outer circle with inner hole)
-                          <>
-                            <defs>
-                              <mask id="annulus-mask">
-                                <rect width="100%" height="100%" fill="white" />
+                        {showDetectorOverlay && detectorType !== 'none' && (() => {
+                          const colors = getOverlayColor()
+                          const centerX = pattern.width / 2 + centerOffsetX
+                          const centerY = pattern.height / 2 + centerOffsetY
+
+                          if (detectorType === 'bf') {
+                            // BF: filled semi-transparent circle
+                            return (
+                              <circle
+                                cx={centerX}
+                                cy={centerY}
+                                r={bfRadius}
+                                fill={colors.fill}
+                                stroke={colors.stroke}
+                                strokeWidth="1"
+                              />
+                            )
+                          } else if (detectorType === 'abf') {
+                            // ABF: semi-transparent annulus
+                            return (
+                              <>
+                                <defs>
+                                  <mask id="abf-annulus-mask">
+                                    <rect width="100%" height="100%" fill="white" />
+                                    <circle cx={centerX} cy={centerY} r={abfInner} fill="black" />
+                                  </mask>
+                                </defs>
                                 <circle
-                                  cx={pattern.width / 2}
-                                  cy={pattern.height / 2}
-                                  r={adfInner}
-                                  fill="black"
+                                  cx={centerX}
+                                  cy={centerY}
+                                  r={abfOuter}
+                                  fill={colors.fill}
+                                  mask="url(#abf-annulus-mask)"
                                 />
-                              </mask>
-                            </defs>
-                            <circle
-                              cx={pattern.width / 2}
-                              cy={pattern.height / 2}
-                              r={adfOuter}
-                              fill="rgba(255, 162, 0, 0.3)"
-                              mask="url(#annulus-mask)"
-                            />
-                            <circle
-                              cx={pattern.width / 2}
-                              cy={pattern.height / 2}
-                              r={adfOuter}
-                              fill="none"
-                              stroke="rgba(255, 162, 0, 0.8)"
-                              strokeWidth="1"
-                            />
-                            <circle
-                              cx={pattern.width / 2}
-                              cy={pattern.height / 2}
-                              r={adfInner}
-                              fill="none"
-                              stroke="rgba(255, 162, 0, 0.8)"
-                              strokeWidth="1"
-                            />
-                          </>
-                        )}
+                                <circle
+                                  cx={centerX}
+                                  cy={centerY}
+                                  r={abfOuter}
+                                  fill="none"
+                                  stroke={colors.stroke}
+                                  strokeWidth="1"
+                                />
+                                <circle
+                                  cx={centerX}
+                                  cy={centerY}
+                                  r={abfInner}
+                                  fill="none"
+                                  stroke={colors.stroke}
+                                  strokeWidth="1"
+                                />
+                              </>
+                            )
+                          } else {
+                            // ADF: semi-transparent annulus
+                            return (
+                              <>
+                                <defs>
+                                  <mask id="adf-annulus-mask">
+                                    <rect width="100%" height="100%" fill="white" />
+                                    <circle cx={centerX} cy={centerY} r={adfInner} fill="black" />
+                                  </mask>
+                                </defs>
+                                <circle
+                                  cx={centerX}
+                                  cy={centerY}
+                                  r={adfOuter}
+                                  fill={colors.fill}
+                                  mask="url(#adf-annulus-mask)"
+                                />
+                                <circle
+                                  cx={centerX}
+                                  cy={centerY}
+                                  r={adfOuter}
+                                  fill="none"
+                                  stroke={colors.stroke}
+                                  strokeWidth="1"
+                                />
+                                <circle
+                                  cx={centerX}
+                                  cy={centerY}
+                                  r={adfInner}
+                                  fill="none"
+                                  stroke={colors.stroke}
+                                  strokeWidth="1"
+                                />
+                              </>
+                            )
+                          }
+                        })()}
                       </svg>
                     </div>
                   )
@@ -990,20 +1363,38 @@ function App() {
           {/* Workflow Panel */}
           <div className={`workflow-panel ${workflowCollapsed ? 'collapsed' : ''}`}>
             <div className="workflow-header">
-              <div className="workflow-tabs">
-                <button
-                  className={`workflow-tab ${workflowTab === 'virtual-detector' ? 'active' : ''}`}
-                  onClick={() => setWorkflowTab('virtual-detector')}
-                >
-                  Virtual Detector
-                </button>
-                <button
-                  className={`workflow-tab ${workflowTab === 'atom-detection' ? 'active' : ''}`}
-                  onClick={() => setWorkflowTab('atom-detection')}
-                >
-                  Atom Detection
-                </button>
-              </div>
+              {workflowCollapsed ? (
+                <div className="workflow-summary">
+                  {workflowTab === 'virtual-detector' ? (
+                    <span className="workflow-summary-text">
+                      Virtual Detector: {detectorType === 'none' ? 'None' : (
+                        detectorType === 'bf' ? `BF (0-${bfRadius} px)` :
+                        detectorType === 'abf' ? `ABF (${abfInner}-${abfOuter} px)` :
+                        `ADF (${adfInner}-${adfOuter} px)`
+                      )}
+                    </span>
+                  ) : (
+                    <span className="workflow-summary-text">
+                      Atom Detection: {atomDetectionResult ?? 'Not run'}
+                    </span>
+                  )}
+                </div>
+              ) : (
+                <div className="workflow-tabs">
+                  <button
+                    className={`workflow-tab ${workflowTab === 'virtual-detector' ? 'active' : ''}`}
+                    onClick={() => setWorkflowTab('virtual-detector')}
+                  >
+                    Virtual Detector
+                  </button>
+                  <button
+                    className={`workflow-tab ${workflowTab === 'atom-detection' ? 'active' : ''}`}
+                    onClick={() => setWorkflowTab('atom-detection')}
+                  >
+                    Atom Detection
+                  </button>
+                </div>
+              )}
               <button
                 className="workflow-toggle"
                 onClick={() => setWorkflowCollapsed(!workflowCollapsed)}
@@ -1015,8 +1406,109 @@ function App() {
             {!workflowCollapsed && (
               <div className="workflow-content">
                 {workflowTab === 'virtual-detector' ? (
-                  <div className="workflow-tab-content">
-                    <span className="workflow-placeholder">Detector controls are in the sidebar</span>
+                  <div className="workflow-tab-content virtual-detector-content">
+                    <div className="detector-controls-row">
+                      {/* Overlay Settings */}
+                      <div className="detector-control-group">
+                        <label className="checkbox-label">
+                          <input
+                            type="checkbox"
+                            checked={showDetectorOverlay}
+                            onChange={(e) => setShowDetectorOverlay(e.target.checked)}
+                            disabled={detectorType === 'none'}
+                          />
+                          Show overlay
+                        </label>
+                      </div>
+
+                      <div className="detector-control-group">
+                        <label className="detector-control-label">Opacity</label>
+                        <input
+                          type="range"
+                          min="0"
+                          max="100"
+                          value={overlayOpacity}
+                          onChange={(e) => setOverlayOpacity(Number(e.target.value))}
+                          className="slider detector-slider"
+                          disabled={!showDetectorOverlay || detectorType === 'none'}
+                        />
+                        <span className="detector-control-value">{overlayOpacity}%</span>
+                      </div>
+
+                      <div className="detector-control-group">
+                        <label className="detector-control-label">Color</label>
+                        <select
+                          className="detector-select"
+                          value={overlayColor}
+                          onChange={(e) => setOverlayColor(e.target.value as typeof overlayColor)}
+                          disabled={!showDetectorOverlay || detectorType === 'none'}
+                        >
+                          <option value="auto">Auto</option>
+                          <option value="yellow">Yellow</option>
+                          <option value="cyan">Cyan</option>
+                          <option value="green">Green</option>
+                          <option value="orange">Orange</option>
+                          <option value="magenta">Magenta</option>
+                        </select>
+                      </div>
+
+                      {/* Center Offset */}
+                      <div className="detector-control-group">
+                        <label className="detector-control-label">Center X</label>
+                        <input
+                          type="number"
+                          className="detector-input"
+                          value={centerOffsetX}
+                          onChange={(e) => setCenterOffsetX(Number(e.target.value))}
+                          disabled={detectorType === 'none'}
+                        />
+                      </div>
+                      <div className="detector-control-group">
+                        <label className="detector-control-label">Center Y</label>
+                        <input
+                          type="number"
+                          className="detector-input"
+                          value={centerOffsetY}
+                          onChange={(e) => setCenterOffsetY(Number(e.target.value))}
+                          disabled={detectorType === 'none'}
+                        />
+                      </div>
+                      <button
+                        className={`detector-pick-button ${pickingCenter ? 'active' : ''}`}
+                        onClick={() => setPickingCenter(!pickingCenter)}
+                        disabled={detectorType === 'none'}
+                        title="Click on diffraction pattern to set center"
+                      >
+                        {pickingCenter ? 'Cancel' : 'Pick'}
+                      </button>
+                    </div>
+
+                    <div className="detector-actions-row">
+                      <div className="config-buttons">
+                        <button className="config-button" onClick={handleSaveConfig}>
+                          Save Config
+                        </button>
+                        <button className="config-button" onClick={handleLoadConfig}>
+                          Load Config
+                        </button>
+                      </div>
+                      <button
+                        className="detector-export-button"
+                        onClick={handleExportVirtualImage}
+                        disabled={!virtualImage}
+                      >
+                        Export Image
+                      </button>
+                      {(() => {
+                        const stats = getDetectorStats()
+                        if (!stats || detectorType === 'none') return null
+                        return (
+                          <span className="detector-stats">
+                            Area: {stats.area} px | Range: {stats.inner}-{stats.outer} px
+                          </span>
+                        )
+                      })()}
+                    </div>
                   </div>
                 ) : (
                   <div className="workflow-tab-content atom-detection-content">
@@ -1114,6 +1606,57 @@ function App() {
         onSelect={handleDatasetSelect}
         onCancel={handlePickerCancel}
       />
+
+      {/* Filter Hot Pixels Dialog */}
+      {showFilterHotPixelsDialog && (
+        <div className="modal-overlay">
+          <div className="modal-dialog filter-hot-pixels-dialog">
+            <h3 className="modal-title">Filter Hot Pixels</h3>
+            <p className="modal-description">
+              Remove anomalously bright pixels from the dataset.
+              Pixels more than N standard deviations above the mean will be filtered.
+            </p>
+            <div className="modal-form">
+              <label className="modal-label">
+                Threshold (σ)
+                <input
+                  type="number"
+                  className="modal-input"
+                  value={filterHotPixelsThresh}
+                  onChange={(e) => setFilterHotPixelsThresh(Number(e.target.value))}
+                  min={1}
+                  max={20}
+                  step={0.5}
+                  disabled={filterHotPixelsLoading}
+                />
+              </label>
+            </div>
+            <div className="modal-actions">
+              <button
+                className="modal-button modal-button-secondary"
+                onClick={() => setShowFilterHotPixelsDialog(false)}
+                disabled={filterHotPixelsLoading}
+              >
+                Cancel
+              </button>
+              <button
+                className="modal-button modal-button-primary"
+                onClick={handleFilterHotPixels}
+                disabled={filterHotPixelsLoading}
+              >
+                {filterHotPixelsLoading ? (
+                  <>
+                    <span className="loading-spinner" />
+                    Filtering...
+                  </>
+                ) : (
+                  'Apply'
+                )}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

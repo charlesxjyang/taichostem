@@ -120,6 +120,19 @@ function createMenu(): void {
       ],
     },
     {
+      label: 'Preprocess',
+      submenu: [
+        {
+          label: 'Filter Hot Pixels...',
+          click: () => {
+            if (win) {
+              win.webContents.send('show-filter-hot-pixels-dialog')
+            }
+          },
+        },
+      ],
+    },
+    {
       label: 'View',
       submenu: [
         { role: 'reload' },
@@ -207,6 +220,33 @@ ipcMain.handle('save-csv', async (_event, content: string, defaultFilename: stri
 
   try {
     fs.writeFileSync(result.filePath, content, 'utf-8')
+    return { success: true, filePath: result.filePath }
+  } catch (err) {
+    return { success: false, error: (err as Error).message }
+  }
+})
+
+// IPC handler for saving images (PNG from base64)
+ipcMain.handle('save-image', async (_event, base64Data: string, defaultFilename: string) => {
+  if (!win) return { success: false, error: 'No window' }
+
+  const result = await dialog.showSaveDialog(win, {
+    title: 'Export Image',
+    defaultPath: defaultFilename,
+    filters: [
+      { name: 'PNG Image', extensions: ['png'] },
+      { name: 'TIFF Image', extensions: ['tiff', 'tif'] },
+    ],
+  })
+
+  if (result.canceled || !result.filePath) {
+    return { success: false, canceled: true }
+  }
+
+  try {
+    // Convert base64 to buffer and write to file
+    const buffer = Buffer.from(base64Data, 'base64')
+    fs.writeFileSync(result.filePath, buffer)
     return { success: true, filePath: result.filePath }
   } catch (err) {
     return { success: false, error: (err as Error).message }

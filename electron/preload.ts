@@ -1,12 +1,12 @@
 import { contextBridge, ipcRenderer } from 'electron'
 
 export interface DetectorConfig {
-  type: 'bf' | 'adf'
+  type: 'none' | 'bf' | 'abf' | 'adf'
   inner: number
   outer: number
 }
 
-export interface SaveConfigResult {
+export interface SaveResult {
   success: boolean
   canceled?: boolean
   filePath?: string
@@ -29,13 +29,22 @@ contextBridge.exposeInMainWorld('electronAPI', {
   removeFileSelectedListener: () => {
     ipcRenderer.removeAllListeners('file-selected')
   },
-  saveDetectorConfig: (config: DetectorConfig): Promise<SaveConfigResult> => {
+  onShowFilterHotPixelsDialog: (callback: () => void) => {
+    ipcRenderer.on('show-filter-hot-pixels-dialog', () => callback())
+  },
+  removeFilterHotPixelsDialogListener: () => {
+    ipcRenderer.removeAllListeners('show-filter-hot-pixels-dialog')
+  },
+  saveDetectorConfig: (config: DetectorConfig): Promise<SaveResult> => {
     return ipcRenderer.invoke('save-detector-config', config)
   },
   loadDetectorConfig: (): Promise<LoadConfigResult> => {
     return ipcRenderer.invoke('load-detector-config')
   },
-  saveCsv: (content: string, defaultFilename: string): Promise<SaveConfigResult> => {
+  saveCsv: (content: string, defaultFilename: string): Promise<SaveResult> => {
     return ipcRenderer.invoke('save-csv', content, defaultFilename)
+  },
+  saveImage: (base64Data: string, defaultFilename: string): Promise<SaveResult> => {
+    return ipcRenderer.invoke('save-image', base64Data, defaultFilename)
   },
 })

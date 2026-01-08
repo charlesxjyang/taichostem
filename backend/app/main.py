@@ -33,6 +33,13 @@ _current_virtual_image: np.ndarray | None = None
 # Cached mean and max diffraction patterns (computed on load)
 _cached_mean_diffraction: np.ndarray | None = None
 _cached_max_diffraction: np.ndarray | None = None
+# Calibration values for real and reciprocal space
+_calibration: dict[str, float | str] = {
+    "q_pixel_size": 1.0,
+    "q_pixel_units": "1/Å",
+    "r_pixel_size": 1.0,
+    "r_pixel_units": "Å",
+}
 
 
 # --- Probe Endpoint Schemas ---
@@ -172,6 +179,7 @@ def _compute_diffraction_stats() -> None:
     """
     Compute and cache mean and max diffraction patterns from the current dataset.
 
+    Uses py4DSTEM's get_dp_mean() and get_dp_max() methods for efficient computation.
     Should be called after loading a dataset. Updates the global cache variables
     _cached_mean_diffraction and _cached_max_diffraction.
     """
@@ -182,19 +190,35 @@ def _compute_diffraction_stats() -> None:
         _cached_max_diffraction = None
         return
 
-    # Compute mean and max over real-space dimensions
-    if _current_dataset.ndim == 4:
-        # Shape is [Rx, Ry, Qx, Qy]
-        _cached_mean_diffraction = np.mean(_current_dataset, axis=(0, 1))
-        _cached_max_diffraction = np.max(_current_dataset, axis=(0, 1))
-    elif _current_dataset.ndim == 3:
-        # Shape is [Rx, Qx, Qy] (1D scan)
-        _cached_mean_diffraction = np.mean(_current_dataset, axis=0)
-        _cached_max_diffraction = np.max(_current_dataset, axis=0)
-    else:
-        # 2D or other - just use as-is
-        _cached_mean_diffraction = _current_dataset.copy()
-        _cached_max_diffraction = _current_dataset.copy()
+    try:
+        # Create py4DSTEM DataCube and use its methods
+        datacube = py4DSTEM.DataCube(data=_current_dataset)
+
+        # Get mean diffraction pattern
+        mean_dp = datacube.get_dp_mean()
+        if hasattr(mean_dp, "data"):
+            _cached_mean_diffraction = mean_dp.data
+        else:
+            _cached_mean_diffraction = mean_dp
+
+        # Get max diffraction pattern
+        max_dp = datacube.get_dp_max()
+        if hasattr(max_dp, "data"):
+            _cached_max_diffraction = max_dp.data
+        else:
+            _cached_max_diffraction = max_dp
+
+    except Exception:
+        # Fallback to numpy if py4DSTEM methods fail
+        if _current_dataset.ndim == 4:
+            _cached_mean_diffraction = np.mean(_current_dataset, axis=(0, 1))
+            _cached_max_diffraction = np.max(_current_dataset, axis=(0, 1))
+        elif _current_dataset.ndim == 3:
+            _cached_mean_diffraction = np.mean(_current_dataset, axis=0)
+            _cached_max_diffraction = np.max(_current_dataset, axis=0)
+        else:
+            _cached_mean_diffraction = _current_dataset.copy()
+            _cached_max_diffraction = _current_dataset.copy()
 
 
 @app.get("/health")
@@ -608,7 +632,7 @@ async def get_max_diffraction(
 
 @app.get("/dataset/virtual-image", response_model=VirtualImageResponse)
 async def get_virtual_image(
-    type: Literal["bf", "adf"] = "bf",
+    type: Literal["bf", "abf", "adf"] = "bf",
     inner: int = 0,
     outer: int = 20,
     log_scale: bool = False,
@@ -618,14 +642,20 @@ async def get_virtual_image(
     """
     Compute a virtual image by integrating within a circular/annular detector.
 
-    Supports two detector modes:
-    - BF (bright-field): inner=0, uses only outer radius
-    - ADF (annular dark-field): uses both inner and outer radii
+    Uses py4DSTEM's get_virtual_image method for efficient computation.
+
+    Supports three detector modes:
+    - BF (bright-field): Center disk, inner=0, uses only outer radius
+    - ABF (annular bright-field): Annular region just outside BF disk,
+      captures the region between the BF disk edge and the ADF inner radius.
+      Useful for light element detection.
+    - ADF (annular dark-field): Outer annular ring, uses both inner and outer radii
 
     Parameters
     ----------
-    type : Literal["bf", "adf"]
-        Detector type. "bf" for bright-field (disk), "adf" for annular dark-field.
+    type : Literal["bf", "abf", "adf"]
+        Detector type. "bf" for bright-field (disk), "abf" for annular bright-field,
+        "adf" for annular dark-field.
     inner : int
         Inner radius of the detector in pixels (ignored for BF mode).
     outer : int
@@ -665,40 +695,50 @@ async def get_virtual_image(
 
     # Get diffraction pattern dimensions
     if _current_dataset.ndim == 4:
-        rx, ry, qx, qy = _current_dataset.shape
+        _, _, qx, qy = _current_dataset.shape
     elif _current_dataset.ndim == 3:
-        rx, qx, qy = _current_dataset.shape
-        ry = 1
+        _, qx, qy = _current_dataset.shape
     else:
         raise HTTPException(
             status_code=400,
             detail=f"Dataset must be 3D or 4D, got {_current_dataset.ndim}D",
         )
 
-    # Create circular mask for the annular detector
-    center_x, center_y = qx // 2, qy // 2
-    y_coords, x_coords = np.ogrid[:qx, :qy]
-    distance_from_center = np.sqrt(
-        (x_coords - center_y) ** 2 + (y_coords - center_x) ** 2
-    )
-    mask = (distance_from_center >= inner) & (distance_from_center < outer)
-
     global _current_virtual_image
 
-    # Compute virtual image by integrating over the masked region
-    if _current_dataset.ndim == 4:
-        # Sum over masked diffraction pixels for each scan position
-        virtual_image = np.sum(
-            _current_dataset[:, :, mask], axis=-1
-        )
-    else:
-        # 3D case: reshape to 2D for output
-        virtual_image = np.sum(
-            _current_dataset[:, mask], axis=-1
-        ).reshape(rx, 1)
+    try:
+        # Create py4DSTEM DataCube from current dataset
+        datacube = py4DSTEM.DataCube(data=_current_dataset)
 
-    # Store raw virtual image for atom detection
-    _current_virtual_image = virtual_image.copy()
+        # Calculate center of diffraction pattern
+        center_x, center_y = qx / 2, qy / 2
+
+        # Use py4DSTEM's get_virtual_image method
+        if type == "bf":
+            # Bright-field: circular detector
+            virtual_image = datacube.get_virtual_image(
+                mode="circle",
+                geometry=(center_x, center_y, outer),
+            )
+        else:
+            # ABF or ADF: annular detector
+            virtual_image = datacube.get_virtual_image(
+                mode="annulus",
+                geometry=(center_x, center_y, inner, outer),
+            )
+
+        # Extract the data array from the VirtualImage object
+        if hasattr(virtual_image, "data"):
+            virtual_image = virtual_image.data
+
+        # Store raw virtual image for atom detection
+        _current_virtual_image = virtual_image.copy()
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to compute virtual image: {str(e)}",
+        )
 
     # Process for display with log scale and contrast
     normalized = _process_image_for_display(
@@ -823,6 +863,137 @@ class FindAtomsResponse(BaseModel):
     positions: list[list[float]]
 
 
+# --- Preprocessing Schemas ---
+
+
+class FilterHotPixelsRequest(BaseModel):
+    """Request model for hot pixel filtering."""
+
+    thresh: float = 8.0
+
+
+class FilterHotPixelsResponse(BaseModel):
+    """Response model for hot pixel filtering."""
+
+    success: bool
+    pixels_filtered: int
+    message: str
+
+
+# --- Calibration Schemas ---
+
+
+class CalibrationResponse(BaseModel):
+    """Response model for calibration values."""
+
+    q_pixel_size: float
+    q_pixel_units: str
+    r_pixel_size: float
+    r_pixel_units: str
+
+
+class CalibrationUpdateRequest(BaseModel):
+    """Request model for updating calibration values."""
+
+    q_pixel_size: float | None = None
+    q_pixel_units: str | None = None
+    r_pixel_size: float | None = None
+    r_pixel_units: str | None = None
+
+
+@app.get("/dataset/calibration", response_model=CalibrationResponse)
+async def get_calibration() -> CalibrationResponse:
+    """
+    Get the current calibration values for the loaded dataset.
+
+    Returns the pixel sizes and units for both real space (R) and
+    reciprocal space (Q).
+
+    Returns
+    -------
+    CalibrationResponse
+        Current calibration values.
+
+    Raises
+    ------
+    HTTPException
+        400 if no dataset is loaded.
+    """
+    if _current_dataset is None:
+        raise HTTPException(
+            status_code=400,
+            detail="No dataset loaded. Load a dataset first using POST /dataset/load",
+        )
+
+    return CalibrationResponse(
+        q_pixel_size=float(_calibration["q_pixel_size"]),
+        q_pixel_units=str(_calibration["q_pixel_units"]),
+        r_pixel_size=float(_calibration["r_pixel_size"]),
+        r_pixel_units=str(_calibration["r_pixel_units"]),
+    )
+
+
+@app.post("/dataset/calibration", response_model=CalibrationResponse)
+async def set_calibration(request: CalibrationUpdateRequest) -> CalibrationResponse:
+    """
+    Update the calibration values for the loaded dataset.
+
+    Only the provided fields will be updated; others remain unchanged.
+
+    Parameters
+    ----------
+    request : CalibrationUpdateRequest
+        Fields to update. All fields are optional.
+
+    Returns
+    -------
+    CalibrationResponse
+        Updated calibration values.
+
+    Raises
+    ------
+    HTTPException
+        400 if no dataset is loaded or invalid values provided.
+    """
+    global _calibration
+
+    if _current_dataset is None:
+        raise HTTPException(
+            status_code=400,
+            detail="No dataset loaded. Load a dataset first using POST /dataset/load",
+        )
+
+    # Update only provided fields
+    if request.q_pixel_size is not None:
+        if request.q_pixel_size <= 0:
+            raise HTTPException(
+                status_code=400,
+                detail="q_pixel_size must be positive",
+            )
+        _calibration["q_pixel_size"] = request.q_pixel_size
+
+    if request.q_pixel_units is not None:
+        _calibration["q_pixel_units"] = request.q_pixel_units
+
+    if request.r_pixel_size is not None:
+        if request.r_pixel_size <= 0:
+            raise HTTPException(
+                status_code=400,
+                detail="r_pixel_size must be positive",
+            )
+        _calibration["r_pixel_size"] = request.r_pixel_size
+
+    if request.r_pixel_units is not None:
+        _calibration["r_pixel_units"] = request.r_pixel_units
+
+    return CalibrationResponse(
+        q_pixel_size=float(_calibration["q_pixel_size"]),
+        q_pixel_units=str(_calibration["q_pixel_units"]),
+        r_pixel_size=float(_calibration["r_pixel_size"]),
+        r_pixel_units=str(_calibration["r_pixel_units"]),
+    )
+
+
 @app.post("/analysis/find-atoms", response_model=FindAtomsResponse)
 async def find_atoms(request: FindAtomsRequest) -> FindAtomsResponse:
     """
@@ -920,3 +1091,79 @@ async def find_atoms(request: FindAtomsRequest) -> FindAtomsResponse:
         count=len(positions),
         positions=positions,
     )
+
+
+@app.post("/dataset/preprocess/filter-hot-pixels", response_model=FilterHotPixelsResponse)
+async def filter_hot_pixels(request: FilterHotPixelsRequest) -> FilterHotPixelsResponse:
+    """
+    Filter hot pixels from the current 4D-STEM dataset.
+
+    Uses py4DSTEM's filter_hot_pixels method to identify and remove
+    anomalously bright pixels that can interfere with analysis.
+
+    Parameters
+    ----------
+    request : FilterHotPixelsRequest
+        thresh : float
+            Threshold for hot pixel detection. Pixels with intensity
+            more than thresh standard deviations above the mean are
+            replaced. Default is 8.0.
+
+    Returns
+    -------
+    FilterHotPixelsResponse
+        success : bool
+            Whether the operation completed successfully.
+        pixels_filtered : int
+            Number of hot pixels that were filtered.
+        message : str
+            Status message describing the result.
+
+    Raises
+    ------
+    HTTPException
+        400 if no dataset is loaded.
+        500 if filtering fails.
+    """
+    global _current_dataset, _cached_mean_diffraction, _cached_max_diffraction
+    global _current_virtual_image
+
+    if _current_dataset is None:
+        raise HTTPException(
+            status_code=400,
+            detail="No dataset loaded. Load a dataset first using POST /dataset/load",
+        )
+
+    try:
+        # Create a py4DSTEM DataCube from our numpy array
+        datacube = py4DSTEM.DataCube(data=_current_dataset)
+
+        # Count pixels before filtering (estimate hot pixels by threshold)
+        mean_val = np.mean(_current_dataset)
+        std_val = np.std(_current_dataset)
+        hot_pixel_mask = _current_dataset > (mean_val + request.thresh * std_val)
+        pixels_before = int(np.sum(hot_pixel_mask))
+
+        # Apply hot pixel filter
+        datacube.filter_hot_pixels(thresh=request.thresh)
+
+        # Update the in-memory dataset with the filtered data
+        _current_dataset = datacube.data
+
+        # Recompute cached diffraction patterns
+        _compute_diffraction_stats()
+
+        # Clear virtual image cache (will be recomputed on next request)
+        _current_virtual_image = None
+
+        return FilterHotPixelsResponse(
+            success=True,
+            pixels_filtered=pixels_before,
+            message=f"Successfully filtered hot pixels with threshold {request.thresh}",
+        )
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to filter hot pixels: {str(e)}",
+        )
