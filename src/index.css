@@ -264,6 +264,7 @@ html, body, #root {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  min-height: 32px;
 }
 
 .diffraction-mode-select {
