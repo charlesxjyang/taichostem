@@ -36,6 +36,14 @@ function App() {
   // Diffraction pattern at clicked position
   const [diffractionPattern, setDiffractionPattern] = useState<DiffractionPatternResponse | null>(null)
 
+  // Diffraction view mode and cached patterns
+  const [diffractionViewMode, setDiffractionViewMode] = useState<'live' | 'mean' | 'max'>('live')
+  const [cachedMeanDiffraction, setCachedMeanDiffraction] = useState<MeanDiffractionResponse | null>(null)
+  const [cachedMaxDiffraction, setCachedMaxDiffraction] = useState<MeanDiffractionResponse | null>(null)
+
+  // Debounce timer ref for detector changes
+  const detectorDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+
   // Sidebar state
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
 
@@ -43,6 +51,26 @@ function App() {
   const [logScale, setLogScale] = useState(false)
   const [contrastMin, setContrastMin] = useState(0)
   const [contrastMax, setContrastMax] = useState(100)
+
+  // Detector controls
+  const [detectorType, setDetectorType] = useState<'bf' | 'adf'>('bf')
+  const [bfRadius, setBfRadius] = useState(20)
+  const [adfInner, setAdfInner] = useState(20)
+  const [adfOuter, setAdfOuter] = useState(60)
+
+  // Workflow panel state
+  const [workflowCollapsed, setWorkflowCollapsed] = useState(false)
+  const [workflowTab, setWorkflowTab] = useState<'virtual-detector' | 'atom-detection'>('virtual-detector')
+
+  // Atom detection controls
+  const [atomThreshold, setAtomThreshold] = useState(0.3)
+  const [atomMinDistance, setAtomMinDistance] = useState(5)
+  const [atomGaussianRefinement, setAtomGaussianRefinement] = useState(true)
+  const [atomDetectionResult, setAtomDetectionResult] = useState<string | null>(null)
+  const [atomDetectionLoading, setAtomDetectionLoading] = useState(false)
+  const [atomDetectionError, setAtomDetectionError] = useState<string | null>(null)
+  const [atomPositions, setAtomPositions] = useState<[number, number][]>([])
+  const [showAtomOverlay, setShowAtomOverlay] = useState(true)
 
   /**
    * Probe a file to determine its structure.
@@ -116,9 +144,33 @@ function App() {
   }, [])
 
   /**
-   * Fetch the virtual bright-field image for the currently loaded dataset.
+   * Fetch the max diffraction pattern for the currently loaded dataset.
+   */
+  const fetchMaxDiffraction = useCallback(async (
+    logScale: boolean = false,
+    contrastMinVal: number = 0,
+    contrastMaxVal: number = 100
+  ): Promise<MeanDiffractionResponse> => {
+    const params = new URLSearchParams({
+      log_scale: String(logScale),
+      contrast_min: String(contrastMinVal),
+      contrast_max: String(contrastMaxVal),
+    })
+    const response = await fetch(`${BACKEND_URL}/dataset/diffraction/max?${params}`)
+
+    if (!response.ok) {
+      const errorData = await response.json()
+      throw new Error(errorData.detail || `HTTP ${response.status}`)
+    }
+
+    return response.json()
+  }, [])
+
+  /**
+   * Fetch the virtual image for the currently loaded dataset.
    */
   const fetchVirtualImage = useCallback(async (
+    type: 'bf' | 'adf' = 'bf',
     inner: number = 0,
     outer: number = 20,
     logScale: boolean = false,
@@ -126,6 +178,7 @@ function App() {
     contrastMaxVal: number = 100
   ): Promise<VirtualImageResponse> => {
     const params = new URLSearchParams({
+      type,
       inner: String(inner),
       outer: String(outer),
       log_scale: String(logScale),
@@ -218,14 +271,46 @@ function App() {
 
     setClickedPosition({ x: imageX, y: imageY })
 
-    // Fetch diffraction pattern at clicked position
-    try {
-      const pattern = await fetchDiffractionPattern(imageX, imageY, logScale, contrastMin, contrastMax)
-      setDiffractionPattern(pattern)
-    } catch (err) {
-      console.error('Failed to fetch diffraction pattern:', err)
+    // Only fetch diffraction pattern when in live mode
+    if (diffractionViewMode === 'live') {
+      try {
+        const pattern = await fetchDiffractionPattern(imageX, imageY, logScale, contrastMin, contrastMax)
+        setDiffractionPattern(pattern)
+      } catch (err) {
+        console.error('Failed to fetch diffraction pattern:', err)
+      }
     }
-  }, [virtualImage, fetchDiffractionPattern, logScale, contrastMin, contrastMax])
+  }, [virtualImage, fetchDiffractionPattern, logScale, contrastMin, contrastMax, diffractionViewMode])
+
+  /**
+   * Handle diffraction view mode change.
+   * Fetches and caches mean/max patterns on first selection.
+   */
+  const handleDiffractionViewModeChange = useCallback(async (mode: 'live' | 'mean' | 'max') => {
+    setDiffractionViewMode(mode)
+
+    if (mode === 'mean') {
+      // Fetch and cache mean pattern if not already cached
+      if (!cachedMeanDiffraction) {
+        try {
+          const pattern = await fetchMeanDiffraction(logScale, contrastMin, contrastMax)
+          setCachedMeanDiffraction(pattern)
+        } catch (err) {
+          console.error('Failed to fetch mean diffraction:', err)
+        }
+      }
+    } else if (mode === 'max') {
+      // Fetch and cache max pattern if not already cached
+      if (!cachedMaxDiffraction) {
+        try {
+          const pattern = await fetchMaxDiffraction(logScale, contrastMin, contrastMax)
+          setCachedMaxDiffraction(pattern)
+        } catch (err) {
+          console.error('Failed to fetch max diffraction:', err)
+        }
+      }
+    }
+  }, [cachedMeanDiffraction, cachedMaxDiffraction, fetchMeanDiffraction, fetchMaxDiffraction, logScale, contrastMin, contrastMax])
 
   /**
    * Handle file selection from Electron.
@@ -236,6 +321,9 @@ function App() {
     setDatasetInfo(null)
     setMeanDiffraction(null)
     setVirtualImage(null)
+    setCachedMeanDiffraction(null)
+    setCachedMaxDiffraction(null)
+    setDiffractionViewMode('live')
     setClickedPosition(null)
     setDiffractionPattern(null)
     setError(null)
@@ -245,6 +333,10 @@ function App() {
     try {
       const probeResult = await probeFile(filePath)
 
+      // Compute initial detector radii
+      const initialInner = detectorType === 'bf' ? 0 : adfInner
+      const initialOuter = detectorType === 'bf' ? bfRadius : adfOuter
+
       if (probeResult.type === 'single') {
         // Single datacube - load directly
         const info = await loadDataset(filePath)
@@ -252,7 +344,7 @@ function App() {
         // Fetch images in parallel
         const [diffraction, virtual] = await Promise.all([
           fetchMeanDiffraction(logScale, contrastMin, contrastMax),
-          fetchVirtualImage(0, 20, logScale, contrastMin, contrastMax),
+          fetchVirtualImage(detectorType, initialInner, initialOuter, logScale, contrastMin, contrastMax),
         ])
         setMeanDiffraction(diffraction)
         setVirtualImage(virtual)
@@ -267,7 +359,7 @@ function App() {
           // Fetch images in parallel
           const [diffraction, virtual] = await Promise.all([
             fetchMeanDiffraction(logScale, contrastMin, contrastMax),
-            fetchVirtualImage(0, 20, logScale, contrastMin, contrastMax),
+            fetchVirtualImage(detectorType, initialInner, initialOuter, logScale, contrastMin, contrastMax),
           ])
           setMeanDiffraction(diffraction)
           setVirtualImage(virtual)
@@ -278,7 +370,7 @@ function App() {
           // Fetch images in parallel
           const [diffraction, virtual] = await Promise.all([
             fetchMeanDiffraction(logScale, contrastMin, contrastMax),
-            fetchVirtualImage(0, 20, logScale, contrastMin, contrastMax),
+            fetchVirtualImage(detectorType, initialInner, initialOuter, logScale, contrastMin, contrastMax),
           ])
           setMeanDiffraction(diffraction)
           setVirtualImage(virtual)
@@ -296,7 +388,7 @@ function App() {
     } finally {
       setIsLoading(false)
     }
-  }, [probeFile, loadDataset, fetchMeanDiffraction, fetchVirtualImage, logScale, contrastMin, contrastMax])
+  }, [probeFile, loadDataset, fetchMeanDiffraction, fetchVirtualImage, logScale, contrastMin, contrastMax, detectorType, bfRadius, adfInner, adfOuter])
 
   /**
    * Handle dataset selection from the picker modal.
@@ -313,10 +405,13 @@ function App() {
     try {
       const info = await loadDataset(pendingFilePath, datasetPath)
       setDatasetInfo(info)
+      // Compute detector radii
+      const inner = detectorType === 'bf' ? 0 : adfInner
+      const outer = detectorType === 'bf' ? bfRadius : adfOuter
       // Fetch images in parallel
       const [diffraction, virtual] = await Promise.all([
         fetchMeanDiffraction(logScale, contrastMin, contrastMax),
-        fetchVirtualImage(0, 20, logScale, contrastMin, contrastMax),
+        fetchVirtualImage(detectorType, inner, outer, logScale, contrastMin, contrastMax),
       ])
       setMeanDiffraction(diffraction)
       setVirtualImage(virtual)
@@ -327,7 +422,18 @@ function App() {
       setPendingFilePath(null)
       setHdf5Datasets([])
     }
-  }, [pendingFilePath, loadDataset, fetchMeanDiffraction, fetchVirtualImage, logScale, contrastMin, contrastMax])
+  }, [pendingFilePath, loadDataset, fetchMeanDiffraction, fetchVirtualImage, logScale, contrastMin, contrastMax, detectorType, bfRadius, adfInner, adfOuter])
+
+  /**
+   * Compute detector inner/outer radii based on current settings.
+   */
+  const getDetectorRadii = useCallback(() => {
+    if (detectorType === 'bf') {
+      return { inner: 0, outer: bfRadius }
+    } else {
+      return { inner: adfInner, outer: adfOuter }
+    }
+  }, [detectorType, bfRadius, adfInner, adfOuter])
 
   /**
    * Refetch images when display settings change.
@@ -337,8 +443,9 @@ function App() {
 
     const refetchImages = async () => {
       try {
-        // Refetch virtual image
-        const virtual = await fetchVirtualImage(0, 20, logScale, contrastMin, contrastMax)
+        const { inner, outer } = getDetectorRadii()
+        // Refetch virtual image with current detector settings
+        const virtual = await fetchVirtualImage(detectorType, inner, outer, logScale, contrastMin, contrastMax)
         setVirtualImage(virtual)
 
         // Refetch diffraction (either mean or at clicked position)
@@ -364,6 +471,35 @@ function App() {
   }, [logScale, contrastMin, contrastMax]) // Only refetch when display settings change
 
   /**
+   * Refetch virtual image when detector settings change (debounced).
+   */
+  useEffect(() => {
+    if (!datasetInfo) return
+
+    // Clear any pending debounce
+    if (detectorDebounceRef.current) {
+      clearTimeout(detectorDebounceRef.current)
+    }
+
+    // Debounce detector changes by 200ms
+    detectorDebounceRef.current = setTimeout(async () => {
+      try {
+        const { inner, outer } = getDetectorRadii()
+        const virtual = await fetchVirtualImage(detectorType, inner, outer, logScale, contrastMin, contrastMax)
+        setVirtualImage(virtual)
+      } catch (err) {
+        console.error('Failed to refetch virtual image:', err)
+      }
+    }, 200)
+
+    return () => {
+      if (detectorDebounceRef.current) {
+        clearTimeout(detectorDebounceRef.current)
+      }
+    }
+  }, [detectorType, bfRadius, adfInner, adfOuter, getDetectorRadii, fetchVirtualImage, logScale, contrastMin, contrastMax, datasetInfo])
+
+  /**
    * Handle picker modal cancel.
    */
   const handlePickerCancel = useCallback(() => {
@@ -372,6 +508,98 @@ function App() {
     setHdf5Datasets([])
     setCurrentFile(null)
   }, [])
+
+  /**
+   * Save current detector configuration to a JSON file.
+   */
+  const handleSaveConfig = useCallback(async () => {
+    const { inner, outer } = getDetectorRadii()
+    const config = {
+      type: detectorType,
+      inner,
+      outer,
+    }
+
+    const result = await window.electronAPI.saveDetectorConfig(config)
+    if (!result.success && !result.canceled) {
+      console.error('Failed to save config:', result.error)
+    }
+  }, [detectorType, getDetectorRadii])
+
+  /**
+   * Load detector configuration from a JSON file.
+   */
+  const handleLoadConfig = useCallback(async () => {
+    const result = await window.electronAPI.loadDetectorConfig()
+    if (result.success && result.config) {
+      const { type, inner, outer } = result.config
+      setDetectorType(type)
+      if (type === 'bf') {
+        setBfRadius(outer)
+      } else {
+        setAdfInner(inner)
+        setAdfOuter(outer)
+      }
+    } else if (!result.canceled) {
+      console.error('Failed to load config:', result.error)
+    }
+  }, [])
+
+  /**
+   * Export atom positions to CSV file.
+   */
+  const handleExportCsv = useCallback(async () => {
+    if (atomPositions.length === 0) return
+
+    // Build CSV content with header
+    const header = 'index,x,y'
+    const rows = atomPositions.map((pos, idx) => `${idx},${pos[0]},${pos[1]}`)
+    const csvContent = [header, ...rows].join('\n')
+
+    const result = await window.electronAPI.saveCsv(csvContent, 'atom-positions.csv')
+    if (!result.success && !result.canceled) {
+      console.error('Failed to export CSV:', result.error)
+    }
+  }, [atomPositions])
+
+  /**
+   * Run atom detection on the current virtual image.
+   */
+  const handleRunAtomDetection = useCallback(async () => {
+    setAtomDetectionLoading(true)
+    setAtomDetectionError(null)
+    setAtomDetectionResult(null)
+    setAtomPositions([])
+
+    try {
+      const response = await fetch(`${BACKEND_URL}/analysis/find-atoms`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          threshold: atomThreshold,
+          min_distance: atomMinDistance,
+          refine: atomGaussianRefinement,
+        }),
+      })
+
+      if (!response.ok) {
+        const errorData = await response.json()
+        throw new Error(errorData.detail || `HTTP ${response.status}`)
+      }
+
+      const data: { count: number; positions: [number, number][] } = await response.json()
+      setAtomDetectionResult(`${data.count} atoms`)
+      setAtomPositions(data.positions)
+      setShowAtomOverlay(true)
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Failed to detect atoms'
+      setAtomDetectionError(message)
+      setAtomDetectionResult(null)
+      setAtomPositions([])
+    } finally {
+      setAtomDetectionLoading(false)
+    }
+  }, [atomThreshold, atomMinDistance, atomGaussianRefinement])
 
   useEffect(() => {
     window.electronAPI.onFileSelected(handleFileSelected)
@@ -477,76 +705,393 @@ function App() {
                   </div>
                 </div>
               </div>
+
+              {/* Detector Section */}
+              <div className="sidebar-section">
+                <h3 className="sidebar-section-title">Detector</h3>
+                <div className="sidebar-control">
+                  <div className="radio-group">
+                    <label className="radio-label">
+                      <input
+                        type="radio"
+                        name="detector"
+                        value="bf"
+                        checked={detectorType === 'bf'}
+                        onChange={() => setDetectorType('bf')}
+                      />
+                      BF
+                    </label>
+                    <label className="radio-label">
+                      <input
+                        type="radio"
+                        name="detector"
+                        value="adf"
+                        checked={detectorType === 'adf'}
+                        onChange={() => setDetectorType('adf')}
+                      />
+                      ADF
+                    </label>
+                    <label className="radio-label disabled">
+                      <input
+                        type="radio"
+                        name="detector"
+                        value="custom"
+                        disabled
+                      />
+                      Custom
+                    </label>
+                  </div>
+                </div>
+
+                {detectorType === 'bf' && (
+                  <div className="sidebar-control">
+                    <div className="slider-row">
+                      <span className="slider-label-small">Radius</span>
+                      <input
+                        type="range"
+                        min="1"
+                        max="100"
+                        value={bfRadius}
+                        onChange={(e) => setBfRadius(Number(e.target.value))}
+                        className="slider"
+                      />
+                      <span className="slider-value">{bfRadius}</span>
+                    </div>
+                  </div>
+                )}
+
+                {detectorType === 'adf' && (
+                  <div className="sidebar-control">
+                    <div className="contrast-sliders">
+                      <div className="slider-row">
+                        <span className="slider-label-small">Inner</span>
+                        <input
+                          type="range"
+                          min="0"
+                          max="100"
+                          value={adfInner}
+                          onChange={(e) => {
+                            const newInner = Number(e.target.value)
+                            setAdfInner(newInner)
+                            if (newInner >= adfOuter) {
+                              setAdfOuter(Math.min(100, newInner + 1))
+                            }
+                          }}
+                          className="slider"
+                        />
+                        <span className="slider-value">{adfInner}</span>
+                      </div>
+                      <div className="slider-row">
+                        <span className="slider-label-small">Outer</span>
+                        <input
+                          type="range"
+                          min="1"
+                          max="100"
+                          value={adfOuter}
+                          onChange={(e) => {
+                            const newOuter = Number(e.target.value)
+                            setAdfOuter(newOuter)
+                            if (newOuter <= adfInner) {
+                              setAdfInner(Math.max(0, newOuter - 1))
+                            }
+                          }}
+                          className="slider"
+                        />
+                        <span className="slider-value">{adfOuter}</span>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                <div className="config-buttons">
+                  <button className="config-button" onClick={handleSaveConfig}>
+                    Save Config
+                  </button>
+                  <button className="config-button" onClick={handleLoadConfig}>
+                    Load Config
+                  </button>
+                </div>
+              </div>
             </div>
           )}
         </div>
 
         {/* Main Content */}
         <div className="main-content">
-          <div className="panel real-space">
-          <span className="panel-label">Real Space</span>
-          {virtualImage && (
-            <div style={{ position: 'relative', display: 'inline-block' }}>
-              <img
-                ref={realSpaceImageRef}
-                src={`data:image/png;base64,${virtualImage.image_base64}`}
-                alt="Virtual bright-field image"
-                onClick={handleRealSpaceClick}
-                style={{
-                  maxWidth: '100%',
-                  maxHeight: '100%',
-                  objectFit: 'contain',
-                  display: 'block',
-                  cursor: 'crosshair',
-                }}
-              />
-              {clickedPosition && (
-                <svg
-                  style={{
-                    position: 'absolute',
-                    top: 0,
-                    left: 0,
-                    width: '100%',
-                    height: '100%',
-                    pointerEvents: 'none',
-                  }}
-                >
-                  {/* Crosshair - position as percentage of image dimensions */}
-                  <line
-                    x1={`${(clickedPosition.x / virtualImage.width) * 100 - 2}%`}
-                    y1={`${(clickedPosition.y / virtualImage.height) * 100}%`}
-                    x2={`${(clickedPosition.x / virtualImage.width) * 100 + 2}%`}
-                    y2={`${(clickedPosition.y / virtualImage.height) * 100}%`}
-                    stroke="red"
-                    strokeWidth="2"
-                  />
-                  <line
-                    x1={`${(clickedPosition.x / virtualImage.width) * 100}%`}
-                    y1={`${(clickedPosition.y / virtualImage.height) * 100 - 2}%`}
-                    x2={`${(clickedPosition.x / virtualImage.width) * 100}%`}
-                    y2={`${(clickedPosition.y / virtualImage.height) * 100 + 2}%`}
-                    stroke="red"
-                    strokeWidth="2"
-                  />
-                </svg>
-              )}
+          <div className="panels-area">
+            <div className="panel real-space">
+              <div className="panel-header">
+                <span className="panel-label">Real Space</span>
+              </div>
+              <div className="panel-content">
+                {virtualImage && (
+                  <div className="panel-image-container">
+                    <img
+                      ref={realSpaceImageRef}
+                      className="panel-image clickable"
+                      src={`data:image/png;base64,${virtualImage.image_base64}`}
+                      alt="Virtual bright-field image"
+                      onClick={handleRealSpaceClick}
+                    />
+                    <svg
+                      style={{
+                        position: 'absolute',
+                        top: 0,
+                        left: 0,
+                        width: '100%',
+                        height: '100%',
+                        pointerEvents: 'none',
+                      }}
+                      viewBox={`0 0 ${virtualImage.width} ${virtualImage.height}`}
+                      preserveAspectRatio="xMidYMid meet"
+                    >
+                      {/* Atom positions overlay */}
+                      {showAtomOverlay && atomPositions.map((pos, idx) => (
+                        <circle
+                          key={idx}
+                          cx={pos[0]}
+                          cy={pos[1]}
+                          r={3}
+                          fill="none"
+                          stroke="#ff3333"
+                          strokeWidth="1.5"
+                        />
+                      ))}
+                      {/* Crosshair at clicked position */}
+                      {clickedPosition && (
+                        <>
+                          <line
+                            x1={clickedPosition.x - 8}
+                            y1={clickedPosition.y}
+                            x2={clickedPosition.x + 8}
+                            y2={clickedPosition.y}
+                            stroke="#00ff00"
+                            strokeWidth="2"
+                          />
+                          <line
+                            x1={clickedPosition.x}
+                            y1={clickedPosition.y - 8}
+                            x2={clickedPosition.x}
+                            y2={clickedPosition.y + 8}
+                            stroke="#00ff00"
+                            strokeWidth="2"
+                          />
+                        </>
+                      )}
+                    </svg>
+                  </div>
+                )}
+              </div>
             </div>
-          )}
-        </div>
-        <div className="panel-divider" />
-        <div className="panel reciprocal-space">
-          <span className="panel-label">Reciprocal Space</span>
-          {(diffractionPattern || meanDiffraction) && (
-            <img
-              src={`data:image/png;base64,${(diffractionPattern || meanDiffraction)!.image_base64}`}
-              alt={diffractionPattern ? 'Diffraction pattern' : 'Mean diffraction pattern'}
-              style={{
-                maxWidth: '100%',
-                maxHeight: '100%',
-                objectFit: 'contain',
-              }}
-            />
-          )}
+            <div className="panel-divider" />
+            <div className="panel reciprocal-space">
+              <div className="panel-header">
+                <span className="panel-label">Reciprocal Space</span>
+                <select
+                  className="diffraction-mode-select"
+                  value={diffractionViewMode}
+                  onChange={(e) => handleDiffractionViewModeChange(e.target.value as 'live' | 'mean' | 'max')}
+                >
+                  <option value="live">Live</option>
+                  <option value="mean">Mean</option>
+                  <option value="max">Max</option>
+                </select>
+              </div>
+              <div className="panel-content">
+                {(() => {
+                  // Determine which pattern to display based on view mode
+                  let pattern: MeanDiffractionResponse | DiffractionPatternResponse | null = null
+                  if (diffractionViewMode === 'live') {
+                    pattern = diffractionPattern || meanDiffraction
+                  } else if (diffractionViewMode === 'mean') {
+                    pattern = cachedMeanDiffraction || meanDiffraction
+                  } else if (diffractionViewMode === 'max') {
+                    pattern = cachedMaxDiffraction
+                  }
+
+                  if (!pattern) return null
+
+                  return (
+                    <div className="panel-image-container">
+                      <img
+                        className="panel-image"
+                        src={`data:image/png;base64,${pattern.image_base64}`}
+                        alt={diffractionPattern ? 'Diffraction pattern' : 'Mean diffraction pattern'}
+                      />
+                      <svg
+                        style={{
+                          position: 'absolute',
+                          top: 0,
+                          left: 0,
+                          width: '100%',
+                          height: '100%',
+                          pointerEvents: 'none',
+                        }}
+                        viewBox={`0 0 ${pattern.width} ${pattern.height}`}
+                        preserveAspectRatio="xMidYMid meet"
+                      >
+                        {detectorType === 'bf' ? (
+                          // BF: filled semi-transparent circle
+                          <circle
+                            cx={pattern.width / 2}
+                            cy={pattern.height / 2}
+                            r={bfRadius}
+                            fill="rgba(0, 162, 255, 0.3)"
+                            stroke="rgba(0, 162, 255, 0.8)"
+                            strokeWidth="1"
+                          />
+                        ) : (
+                          // ADF: semi-transparent annulus (outer circle with inner hole)
+                          <>
+                            <defs>
+                              <mask id="annulus-mask">
+                                <rect width="100%" height="100%" fill="white" />
+                                <circle
+                                  cx={pattern.width / 2}
+                                  cy={pattern.height / 2}
+                                  r={adfInner}
+                                  fill="black"
+                                />
+                              </mask>
+                            </defs>
+                            <circle
+                              cx={pattern.width / 2}
+                              cy={pattern.height / 2}
+                              r={adfOuter}
+                              fill="rgba(255, 162, 0, 0.3)"
+                              mask="url(#annulus-mask)"
+                            />
+                            <circle
+                              cx={pattern.width / 2}
+                              cy={pattern.height / 2}
+                              r={adfOuter}
+                              fill="none"
+                              stroke="rgba(255, 162, 0, 0.8)"
+                              strokeWidth="1"
+                            />
+                            <circle
+                              cx={pattern.width / 2}
+                              cy={pattern.height / 2}
+                              r={adfInner}
+                              fill="none"
+                              stroke="rgba(255, 162, 0, 0.8)"
+                              strokeWidth="1"
+                            />
+                          </>
+                        )}
+                      </svg>
+                    </div>
+                  )
+                })()}
+              </div>
+            </div>
+          </div>
+
+          {/* Workflow Panel */}
+          <div className={`workflow-panel ${workflowCollapsed ? 'collapsed' : ''}`}>
+            <div className="workflow-header">
+              <div className="workflow-tabs">
+                <button
+                  className={`workflow-tab ${workflowTab === 'virtual-detector' ? 'active' : ''}`}
+                  onClick={() => setWorkflowTab('virtual-detector')}
+                >
+                  Virtual Detector
+                </button>
+                <button
+                  className={`workflow-tab ${workflowTab === 'atom-detection' ? 'active' : ''}`}
+                  onClick={() => setWorkflowTab('atom-detection')}
+                >
+                  Atom Detection
+                </button>
+              </div>
+              <button
+                className="workflow-toggle"
+                onClick={() => setWorkflowCollapsed(!workflowCollapsed)}
+                title={workflowCollapsed ? 'Expand panel' : 'Collapse panel'}
+              >
+                {workflowCollapsed ? '▲' : '▼'}
+              </button>
+            </div>
+            {!workflowCollapsed && (
+              <div className="workflow-content">
+                {workflowTab === 'virtual-detector' ? (
+                  <div className="workflow-tab-content">
+                    <span className="workflow-placeholder">Detector controls are in the sidebar</span>
+                  </div>
+                ) : (
+                  <div className="workflow-tab-content atom-detection-content">
+                    <div className="atom-detection-controls">
+                      <div className="atom-control">
+                        <label className="atom-control-label">Threshold</label>
+                        <input
+                          type="range"
+                          min="0"
+                          max="1"
+                          step="0.01"
+                          value={atomThreshold}
+                          onChange={(e) => setAtomThreshold(Number(e.target.value))}
+                          className="slider"
+                        />
+                        <span className="atom-control-value">{atomThreshold.toFixed(2)}</span>
+                      </div>
+                      <div className="atom-control">
+                        <label className="atom-control-label">Min distance</label>
+                        <input
+                          type="range"
+                          min="1"
+                          max="20"
+                          step="1"
+                          value={atomMinDistance}
+                          onChange={(e) => setAtomMinDistance(Number(e.target.value))}
+                          className="slider"
+                        />
+                        <span className="atom-control-value">{atomMinDistance}px</span>
+                      </div>
+                      <div className="atom-control">
+                        <label className="checkbox-label">
+                          <input
+                            type="checkbox"
+                            checked={atomGaussianRefinement}
+                            onChange={(e) => setAtomGaussianRefinement(e.target.checked)}
+                          />
+                          Gaussian refinement
+                        </label>
+                      </div>
+                    </div>
+                    <div className="atom-detection-actions">
+                      <button
+                        className="atom-run-button"
+                        onClick={handleRunAtomDetection}
+                        disabled={atomDetectionLoading || !virtualImage}
+                      >
+                        {atomDetectionLoading ? (
+                          <span className="loading-spinner" />
+                        ) : (
+                          'Run'
+                        )}
+                      </button>
+                      <button
+                        className={`atom-toggle-button ${showAtomOverlay ? 'active' : ''}`}
+                        onClick={() => setShowAtomOverlay(!showAtomOverlay)}
+                        disabled={atomPositions.length === 0}
+                      >
+                        {showAtomOverlay ? 'Hide Overlay' : 'Show Overlay'}
+                      </button>
+                      <button
+                        className="atom-export-button"
+                        onClick={handleExportCsv}
+                        disabled={atomPositions.length === 0}
+                      >
+                        Export CSV
+                      </button>
+                      <span className={`atom-results ${atomDetectionError ? 'error' : ''}`}>
+                        Results: {atomDetectionError ?? atomDetectionResult ?? '—'}
+                      </span>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
           </div>
         </div>
       </div>

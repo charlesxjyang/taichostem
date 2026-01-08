@@ -28,6 +28,11 @@ app.add_middleware(
 # Stores the currently loaded 4D-STEM data array for fast access
 _current_dataset: np.ndarray | None = None
 _current_dataset_path: str | None = None
+# Stores the current virtual image for atom detection
+_current_virtual_image: np.ndarray | None = None
+# Cached mean and max diffraction patterns (computed on load)
+_cached_mean_diffraction: np.ndarray | None = None
+_cached_max_diffraction: np.ndarray | None = None
 
 
 # --- Probe Endpoint Schemas ---
@@ -83,6 +88,14 @@ class DatasetLoadResponse(BaseModel):
 
 class MeanDiffractionResponse(BaseModel):
     """Response model for mean diffraction pattern."""
+
+    image_base64: str
+    width: int
+    height: int
+
+
+class MaxDiffractionResponse(BaseModel):
+    """Response model for max diffraction pattern."""
 
     image_base64: str
     width: int
@@ -153,6 +166,35 @@ def _process_image_for_display(
         normalized = np.zeros_like(result, dtype=np.uint8)
 
     return normalized
+
+
+def _compute_diffraction_stats() -> None:
+    """
+    Compute and cache mean and max diffraction patterns from the current dataset.
+
+    Should be called after loading a dataset. Updates the global cache variables
+    _cached_mean_diffraction and _cached_max_diffraction.
+    """
+    global _cached_mean_diffraction, _cached_max_diffraction
+
+    if _current_dataset is None:
+        _cached_mean_diffraction = None
+        _cached_max_diffraction = None
+        return
+
+    # Compute mean and max over real-space dimensions
+    if _current_dataset.ndim == 4:
+        # Shape is [Rx, Ry, Qx, Qy]
+        _cached_mean_diffraction = np.mean(_current_dataset, axis=(0, 1))
+        _cached_max_diffraction = np.max(_current_dataset, axis=(0, 1))
+    elif _current_dataset.ndim == 3:
+        # Shape is [Rx, Qx, Qy] (1D scan)
+        _cached_mean_diffraction = np.mean(_current_dataset, axis=0)
+        _cached_max_diffraction = np.max(_current_dataset, axis=0)
+    else:
+        # 2D or other - just use as-is
+        _cached_mean_diffraction = _current_dataset.copy()
+        _cached_max_diffraction = _current_dataset.copy()
 
 
 @app.get("/health")
@@ -323,7 +365,7 @@ async def load_dataset(request: DatasetLoadRequest) -> DatasetLoadResponse:
             f"Supported formats: {', '.join(supported_extensions)}",
         )
 
-    global _current_dataset, _current_dataset_path
+    global _current_dataset, _current_dataset_path, _cached_mean_diffraction, _cached_max_diffraction
 
     # Handle HDF5 files with dataset_path parameter
     if suffix in hdf5_extensions:
@@ -345,6 +387,7 @@ async def load_dataset(request: DatasetLoadRequest) -> DatasetLoadResponse:
                     # Cache the dataset in memory
                     _current_dataset = dataset[:]
                     _current_dataset_path = f"{request.path}:{request.dataset_path}"
+                    _compute_diffraction_stats()
                     shape = list(dataset.shape)
                     dtype = str(dataset.dtype)
                     return DatasetLoadResponse(
@@ -368,6 +411,7 @@ async def load_dataset(request: DatasetLoadRequest) -> DatasetLoadResponse:
                         dataset = h5file[ds_info.path]
                         _current_dataset = dataset[:]
                         _current_dataset_path = f"{request.path}:{ds_info.path}"
+                        _compute_diffraction_stats()
                         return DatasetLoadResponse(
                             shape=ds_info.shape,
                             dtype=ds_info.dtype,
@@ -379,6 +423,7 @@ async def load_dataset(request: DatasetLoadRequest) -> DatasetLoadResponse:
                         dataset = h5file[ds_info.path]
                         _current_dataset = dataset[:]
                         _current_dataset_path = f"{request.path}:{ds_info.path}"
+                        _compute_diffraction_stats()
                         return DatasetLoadResponse(
                             shape=ds_info.shape,
                             dtype=ds_info.dtype,
@@ -430,6 +475,7 @@ async def load_dataset(request: DatasetLoadRequest) -> DatasetLoadResponse:
             dtype = str(datacube.dtype)
 
         _current_dataset_path = request.path
+        _compute_diffraction_stats()
 
         return DatasetLoadResponse(shape=shape, dtype=dtype, dataset_path=None)
 
@@ -472,20 +518,14 @@ async def get_mean_diffraction(
     HTTPException
         400 if no dataset is loaded.
     """
-    if _current_dataset is None:
+    if _cached_mean_diffraction is None:
         raise HTTPException(
             status_code=400,
             detail="No dataset loaded. Load a dataset first using POST /dataset/load",
         )
 
-    # Compute mean over real-space dimensions (first two axes for 4D data)
-    # Shape is typically [Rx, Ry, Qx, Qy]
-    if _current_dataset.ndim == 4:
-        mean_pattern = np.mean(_current_dataset, axis=(0, 1))
-    elif _current_dataset.ndim == 3:
-        mean_pattern = np.mean(_current_dataset, axis=0)
-    else:
-        mean_pattern = _current_dataset
+    # Use cached mean pattern
+    mean_pattern = _cached_mean_diffraction
 
     # Process for display with log scale and contrast
     normalized = _process_image_for_display(
@@ -506,8 +546,69 @@ async def get_mean_diffraction(
     )
 
 
+@app.get("/dataset/diffraction/max", response_model=MaxDiffractionResponse)
+async def get_max_diffraction(
+    log_scale: bool = False,
+    contrast_min: float = 0.0,
+    contrast_max: float = 100.0,
+) -> MaxDiffractionResponse:
+    """
+    Get the max diffraction pattern across all scan positions.
+
+    Computes the maximum intensity at each diffraction pixel across all
+    real-space positions, returning a pattern that shows all possible
+    diffraction features. Useful for polycrystalline samples.
+
+    Parameters
+    ----------
+    log_scale : bool
+        If True, apply log10 transform before display.
+    contrast_min : float
+        Minimum percentile for contrast stretch (0-100).
+    contrast_max : float
+        Maximum percentile for contrast stretch (0-100).
+
+    Returns
+    -------
+    MaxDiffractionResponse
+        Base64-encoded PNG image and dimensions.
+
+    Raises
+    ------
+    HTTPException
+        400 if no dataset is loaded.
+    """
+    if _cached_max_diffraction is None:
+        raise HTTPException(
+            status_code=400,
+            detail="No dataset loaded. Load a dataset first using POST /dataset/load",
+        )
+
+    # Use cached max pattern
+    max_pattern = _cached_max_diffraction
+
+    # Process for display with log scale and contrast
+    normalized = _process_image_for_display(
+        max_pattern, log_scale, contrast_min, contrast_max
+    )
+
+    # Convert to PNG
+    image = Image.fromarray(normalized, mode="L")
+    buffer = io.BytesIO()
+    image.save(buffer, format="PNG")
+    buffer.seek(0)
+    image_base64 = base64.b64encode(buffer.read()).decode("utf-8")
+
+    return MaxDiffractionResponse(
+        image_base64=image_base64,
+        width=normalized.shape[1],
+        height=normalized.shape[0],
+    )
+
+
 @app.get("/dataset/virtual-image", response_model=VirtualImageResponse)
 async def get_virtual_image(
+    type: Literal["bf", "adf"] = "bf",
     inner: int = 0,
     outer: int = 20,
     log_scale: bool = False,
@@ -515,17 +616,20 @@ async def get_virtual_image(
     contrast_max: float = 100.0,
 ) -> VirtualImageResponse:
     """
-    Compute a virtual bright-field image by integrating within an annular detector.
+    Compute a virtual image by integrating within a circular/annular detector.
 
-    Integrates the diffraction pattern intensity within a circular/annular region
-    defined by inner and outer radii (in pixels from the center).
+    Supports two detector modes:
+    - BF (bright-field): inner=0, uses only outer radius
+    - ADF (annular dark-field): uses both inner and outer radii
 
     Parameters
     ----------
+    type : Literal["bf", "adf"]
+        Detector type. "bf" for bright-field (disk), "adf" for annular dark-field.
     inner : int
-        Inner radius of the annular detector in pixels (default 0 for bright-field).
+        Inner radius of the detector in pixels (ignored for BF mode).
     outer : int
-        Outer radius of the annular detector in pixels (default 20).
+        Outer radius of the detector in pixels.
     log_scale : bool
         If True, apply log10 transform before display.
     contrast_min : float
@@ -543,6 +647,9 @@ async def get_virtual_image(
     HTTPException
         400 if no dataset is loaded or invalid parameters.
     """
+    # For BF mode, force inner to 0
+    if type == "bf":
+        inner = 0
     if _current_dataset is None:
         raise HTTPException(
             status_code=400,
@@ -576,6 +683,8 @@ async def get_virtual_image(
     )
     mask = (distance_from_center >= inner) & (distance_from_center < outer)
 
+    global _current_virtual_image
+
     # Compute virtual image by integrating over the masked region
     if _current_dataset.ndim == 4:
         # Sum over masked diffraction pixels for each scan position
@@ -587,6 +696,9 @@ async def get_virtual_image(
         virtual_image = np.sum(
             _current_dataset[:, mask], axis=-1
         ).reshape(rx, 1)
+
+    # Store raw virtual image for atom detection
+    _current_virtual_image = virtual_image.copy()
 
     # Process for display with log scale and contrast
     normalized = _process_image_for_display(
@@ -690,4 +802,121 @@ async def get_diffraction_pattern(
         height=normalized.shape[0],
         x=x,
         y=y,
+    )
+
+
+# --- Atom Detection Schemas ---
+
+
+class FindAtomsRequest(BaseModel):
+    """Request model for atom detection."""
+
+    threshold: float = 0.3
+    min_distance: int = 5
+    refine: bool = True
+
+
+class FindAtomsResponse(BaseModel):
+    """Response model for atom detection results."""
+
+    count: int
+    positions: list[list[float]]
+
+
+@app.post("/analysis/find-atoms", response_model=FindAtomsResponse)
+async def find_atoms(request: FindAtomsRequest) -> FindAtomsResponse:
+    """
+    Find atoms in the current virtual image using peak detection.
+
+    Uses scikit-image peak_local_max for initial detection, with optional
+    Gaussian refinement for sub-pixel accuracy.
+
+    Parameters
+    ----------
+    request : FindAtomsRequest
+        threshold : float
+            Minimum intensity threshold as fraction of max (0-1).
+        min_distance : int
+            Minimum distance between peaks in pixels.
+        refine : bool
+            If True, refine positions using Gaussian fitting.
+
+    Returns
+    -------
+    FindAtomsResponse
+        count : int
+            Number of atoms found.
+        positions : list[list[float]]
+            List of [x, y] positions for each atom.
+
+    Raises
+    ------
+    HTTPException
+        400 if no virtual image is available.
+    """
+    from skimage.feature import peak_local_max
+    from scipy.ndimage import gaussian_filter
+
+    if _current_virtual_image is None:
+        raise HTTPException(
+            status_code=400,
+            detail="No virtual image available. Generate a virtual image first.",
+        )
+
+    # Normalize image to 0-1 range
+    img = _current_virtual_image.astype(np.float64)
+    img_min, img_max = img.min(), img.max()
+    if img_max > img_min:
+        img_normalized = (img - img_min) / (img_max - img_min)
+    else:
+        img_normalized = np.zeros_like(img)
+
+    # Apply slight smoothing to reduce noise
+    img_smoothed = gaussian_filter(img_normalized, sigma=1.0)
+
+    # Find peaks using local maxima detection
+    # threshold_abs is the minimum intensity value for a peak
+    threshold_abs = request.threshold * img_smoothed.max()
+
+    coordinates = peak_local_max(
+        img_smoothed,
+        min_distance=request.min_distance,
+        threshold_abs=threshold_abs,
+        exclude_border=True,
+    )
+
+    positions: list[list[float]] = []
+
+    if len(coordinates) > 0:
+        if request.refine:
+            # Gaussian refinement for sub-pixel accuracy
+            for coord in coordinates:
+                y, x = coord
+                # Extract small region around peak for refinement
+                half_size = max(2, request.min_distance // 2)
+                y_min = max(0, y - half_size)
+                y_max = min(img_smoothed.shape[0], y + half_size + 1)
+                x_min = max(0, x - half_size)
+                x_max = min(img_smoothed.shape[1], x + half_size + 1)
+
+                region = img_smoothed[y_min:y_max, x_min:x_max]
+
+                # Compute centroid for sub-pixel refinement
+                if region.sum() > 0:
+                    yy, xx = np.mgrid[0:region.shape[0], 0:region.shape[1]]
+                    total = region.sum()
+                    refined_y = (yy * region).sum() / total + y_min
+                    refined_x = (xx * region).sum() / total + x_min
+                    positions.append([float(refined_x), float(refined_y)])
+                else:
+                    positions.append([float(x), float(y)])
+        else:
+            # Use integer coordinates directly
+            for coord in coordinates:
+                y, x = coord
+                positions.append([float(x), float(y)])
+
+    return FindAtomsResponse(
+        count=len(positions),
+        positions=positions,
     )

@@ -175,8 +175,74 @@ html, body, #root {
   text-align: right;
 }
 
+/* Radio Group */
+.radio-group {
+  display: flex;
+  gap: 12px;
+}
+
+.radio-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.8rem;
+  color: #ccc;
+  cursor: pointer;
+}
+
+.radio-label input[type="radio"] {
+  width: 14px;
+  height: 14px;
+  accent-color: #0066cc;
+}
+
+.radio-label.disabled {
+  color: #666;
+  cursor: not-allowed;
+}
+
+.radio-label.disabled input[type="radio"] {
+  opacity: 0.5;
+}
+
+/* Config Buttons */
+.config-buttons {
+  display: flex;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.config-button {
+  flex: 1;
+  padding: 6px 8px;
+  font-size: 0.7rem;
+  font-weight: 500;
+  background-color: #3d3d3d;
+  color: #ccc;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: background-color 0.15s;
+}
+
+.config-button:hover {
+  background-color: #4d4d4d;
+  color: #fff;
+}
+
+.config-button:active {
+  background-color: #555;
+}
+
 /* Main Content */
 .main-content {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.panels-area {
   flex: 1;
   display: flex;
   min-height: 0;
@@ -185,16 +251,77 @@ html, body, #root {
 .panel {
   flex: 1;
   display: flex;
-  justify-content: center;
-  align-items: center;
+  flex-direction: column;
   min-width: 0;
+  min-height: 0;
+  background-color: #1a1a1a;
+}
+
+.panel-header {
+  padding: 6px 12px;
+  border-bottom: 1px solid #2d2d2d;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.diffraction-mode-select {
+  font-size: 0.65rem;
+  padding: 2px 6px;
+  background-color: #2d2d2d;
+  color: #ccc;
+  border: 1px solid #3d3d3d;
+  border-radius: 3px;
+  cursor: pointer;
+}
+
+.diffraction-mode-select:hover {
+  background-color: #3d3d3d;
+}
+
+.diffraction-mode-select:focus {
+  outline: none;
+  border-color: #0066cc;
 }
 
 .panel-label {
-  font-size: 1.25rem;
-  font-weight: 300;
+  font-size: 0.7rem;
+  font-weight: 500;
   color: #666;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
   user-select: none;
+}
+
+.panel-content {
+  flex: 1;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  padding: 12px;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.panel-image-container {
+  position: relative;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  max-width: 100%;
+  max-height: 100%;
+}
+
+.panel-image {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  display: block;
+}
+
+.panel-image.clickable {
+  cursor: crosshair;
 }
 
 .panel-divider {
@@ -202,12 +329,248 @@ html, body, #root {
   background-color: #3d3d3d;
 }
 
-.real-space {
-  background-color: #1a1a1a;
+/* Workflow Panel */
+.workflow-panel {
+  height: 150px;
+  min-height: 150px;
+  background-color: #252525;
+  border-top: 1px solid #3d3d3d;
+  display: flex;
+  flex-direction: column;
+  transition: height 0.2s ease, min-height 0.2s ease;
 }
 
-.reciprocal-space {
-  background-color: #1a1a1a;
+.workflow-panel.collapsed {
+  height: 32px;
+  min-height: 32px;
+}
+
+.workflow-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 8px;
+  height: 32px;
+  min-height: 32px;
+  border-bottom: 1px solid #3d3d3d;
+}
+
+.workflow-panel.collapsed .workflow-header {
+  border-bottom: none;
+}
+
+.workflow-tabs {
+  display: flex;
+  gap: 4px;
+}
+
+.workflow-tab {
+  padding: 6px 12px;
+  font-size: 0.75rem;
+  font-weight: 500;
+  background: transparent;
+  color: #888;
+  border: none;
+  border-bottom: 2px solid transparent;
+  cursor: pointer;
+  transition: color 0.15s, border-color 0.15s;
+}
+
+.workflow-tab:hover {
+  color: #ccc;
+}
+
+.workflow-tab.active {
+  color: #fff;
+  border-bottom-color: #0066cc;
+}
+
+.workflow-toggle {
+  width: 24px;
+  height: 24px;
+  background: transparent;
+  border: none;
+  color: #888;
+  cursor: pointer;
+  font-size: 10px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.workflow-toggle:hover {
+  color: #fff;
+}
+
+.workflow-content {
+  flex: 1;
+  overflow-y: auto;
+  padding: 12px;
+}
+
+.workflow-tab-content {
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.workflow-placeholder {
+  color: #666;
+  font-size: 0.8rem;
+  font-style: italic;
+}
+
+/* Atom Detection Controls */
+.atom-detection-content {
+  justify-content: flex-start;
+  align-items: stretch;
+  gap: 16px;
+}
+
+.atom-detection-controls {
+  display: flex;
+  gap: 24px;
+  align-items: center;
+}
+
+.atom-control {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.atom-control-label {
+  font-size: 0.75rem;
+  color: #ccc;
+  white-space: nowrap;
+}
+
+.atom-control-value {
+  font-size: 0.7rem;
+  color: #888;
+  min-width: 36px;
+  text-align: right;
+}
+
+.atom-control .slider {
+  width: 100px;
+}
+
+.atom-detection-actions {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  margin-left: auto;
+}
+
+.atom-run-button {
+  padding: 6px 16px;
+  font-size: 0.75rem;
+  font-weight: 500;
+  background-color: #0066cc;
+  color: #fff;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: background-color 0.15s;
+  min-width: 60px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.atom-run-button:hover:not(:disabled) {
+  background-color: #0077ee;
+}
+
+.atom-run-button:active:not(:disabled) {
+  background-color: #0055aa;
+}
+
+.atom-run-button:disabled {
+  background-color: #333;
+  color: #666;
+  cursor: not-allowed;
+}
+
+.loading-spinner {
+  width: 14px;
+  height: 14px;
+  border: 2px solid transparent;
+  border-top-color: #fff;
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.atom-toggle-button {
+  padding: 6px 12px;
+  font-size: 0.75rem;
+  font-weight: 500;
+  background-color: #3d3d3d;
+  color: #ccc;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: background-color 0.15s, color 0.15s;
+}
+
+.atom-toggle-button:hover:not(:disabled) {
+  background-color: #4d4d4d;
+  color: #fff;
+}
+
+.atom-toggle-button.active {
+  background-color: #0066cc;
+  color: #fff;
+}
+
+.atom-toggle-button.active:hover:not(:disabled) {
+  background-color: #0077ee;
+}
+
+.atom-toggle-button:disabled {
+  background-color: #2d2d2d;
+  color: #555;
+  cursor: not-allowed;
+}
+
+.atom-export-button {
+  padding: 6px 12px;
+  font-size: 0.75rem;
+  font-weight: 500;
+  background-color: #3d3d3d;
+  color: #ccc;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: background-color 0.15s, color 0.15s;
+}
+
+.atom-export-button:hover:not(:disabled) {
+  background-color: #4d4d4d;
+  color: #fff;
+}
+
+.atom-export-button:disabled {
+  background-color: #2d2d2d;
+  color: #555;
+  cursor: not-allowed;
+}
+
+.atom-results {
+  font-size: 0.75rem;
+  color: #888;
+}
+
+.atom-results.error {
+  color: #f87171;
 }
 
 /* Status Bar */

@@ -1,4 +1,5 @@
-import { app, BrowserWindow, Menu, dialog } from 'electron'
+import { app, BrowserWindow, Menu, dialog, ipcMain } from 'electron'
+import fs from 'node:fs'
 import { spawn, ChildProcess } from 'node:child_process'
 import path from 'node:path'
 
@@ -162,6 +163,79 @@ app.on('activate', () => {
 
 app.on('before-quit', () => {
   stopPythonBackend()
+})
+
+// IPC handler for saving detector config
+ipcMain.handle('save-detector-config', async (_event, config: object) => {
+  if (!win) return { success: false, error: 'No window' }
+
+  const result = await dialog.showSaveDialog(win, {
+    title: 'Save Detector Configuration',
+    defaultPath: 'detector-config.json',
+    filters: [
+      { name: 'JSON Files', extensions: ['json'] },
+    ],
+  })
+
+  if (result.canceled || !result.filePath) {
+    return { success: false, canceled: true }
+  }
+
+  try {
+    fs.writeFileSync(result.filePath, JSON.stringify(config, null, 2), 'utf-8')
+    return { success: true, filePath: result.filePath }
+  } catch (err) {
+    return { success: false, error: (err as Error).message }
+  }
+})
+
+// IPC handler for saving CSV files
+ipcMain.handle('save-csv', async (_event, content: string, defaultFilename: string) => {
+  if (!win) return { success: false, error: 'No window' }
+
+  const result = await dialog.showSaveDialog(win, {
+    title: 'Export CSV',
+    defaultPath: defaultFilename,
+    filters: [
+      { name: 'CSV Files', extensions: ['csv'] },
+    ],
+  })
+
+  if (result.canceled || !result.filePath) {
+    return { success: false, canceled: true }
+  }
+
+  try {
+    fs.writeFileSync(result.filePath, content, 'utf-8')
+    return { success: true, filePath: result.filePath }
+  } catch (err) {
+    return { success: false, error: (err as Error).message }
+  }
+})
+
+// IPC handler for loading detector config
+ipcMain.handle('load-detector-config', async () => {
+  if (!win) return { success: false, error: 'No window' }
+
+  const result = await dialog.showOpenDialog(win, {
+    title: 'Load Detector Configuration',
+    filters: [
+      { name: 'JSON Files', extensions: ['json'] },
+    ],
+    properties: ['openFile'],
+  })
+
+  if (result.canceled || result.filePaths.length === 0) {
+    return { success: false, canceled: true }
+  }
+
+  try {
+    const content = fs.readFileSync(result.filePaths[0], 'utf-8')
+    const config = JSON.parse(content)
+    return { success: true, config, filePath: result.filePaths[0] }
+  } catch (err) {
+    return { success: false, error: (err as Error).message }
+  }
 })
 
 app.whenReady().then(() => {
