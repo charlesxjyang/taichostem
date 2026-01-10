@@ -60,3 +60,35 @@ export interface DiffractionPatternResponse {
   x: number
   y: number
 }
+
+/** Selection tool types for region selection. */
+export type SelectionTool = 'rectangle' | 'ellipse' | 'lasso' | null
+
+/** Region types for the API. */
+export type RegionType = 'rectangle' | 'ellipse' | 'polygon'
+
+/** Selection geometry stored in state. */
+export interface SelectionGeometry {
+  type: RegionType
+  points: [number, number][]
+}
+
+/** Request for region-based diffraction pattern. */
+export interface RegionDiffractionRequest {
+  mode: 'mean' | 'max'
+  region_type: RegionType
+  points: [number, number][]
+  log_scale?: boolean
+  contrast_min?: number
+  contrast_max?: number
+}
+
+/** Response from the region diffraction endpoint. */
+export interface RegionDiffractionResponse {
+  image_base64: string
+  width: number
+  height: number
+  mode: string
+  region_type: string
+  pixels_in_region: number
+}

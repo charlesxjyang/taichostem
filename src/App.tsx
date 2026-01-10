@@ -8,6 +8,9 @@ import type {
   MeanDiffractionResponse,
   VirtualImageResponse,
   DiffractionPatternResponse,
+  SelectionTool,
+  SelectionGeometry,
+  RegionDiffractionResponse,
 } from './types/dataset'
 
 const BACKEND_URL = 'http://127.0.0.1:8000'
@@ -40,6 +43,13 @@ function App() {
   const [diffractionViewMode, setDiffractionViewMode] = useState<'live' | 'mean' | 'max'>('live')
   const [cachedMeanDiffraction, setCachedMeanDiffraction] = useState<MeanDiffractionResponse | null>(null)
   const [cachedMaxDiffraction, setCachedMaxDiffraction] = useState<MeanDiffractionResponse | null>(null)
+
+  // Region selection state
+  const [selectionTool, setSelectionTool] = useState<SelectionTool>('rectangle')
+  const [selection, setSelection] = useState<SelectionGeometry | null>(null)
+  const [isDrawing, setIsDrawing] = useState(false)
+  const [drawingPoints, setDrawingPoints] = useState<[number, number][]>([])
+  const [regionDiffraction, setRegionDiffraction] = useState<RegionDiffractionResponse | null>(null)
 
   // Debounce timer ref for detector changes
   const detectorDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -192,7 +202,7 @@ function App() {
    * Fetch the virtual image for the currently loaded dataset.
    */
   const fetchVirtualImage = useCallback(async (
-    type: 'bf' | 'adf' = 'bf',
+    type: 'bf' | 'abf' | 'adf' = 'bf',
     inner: number = 0,
     outer: number = 20,
     logScale: boolean = false,
@@ -245,6 +255,38 @@ function App() {
   }, [])
 
   /**
+   * Fetch region-based mean or max diffraction pattern.
+   */
+  const fetchRegionDiffraction = useCallback(async (
+    mode: 'mean' | 'max',
+    regionType: 'rectangle' | 'ellipse' | 'polygon',
+    points: [number, number][],
+    logScale: boolean = false,
+    contrastMinVal: number = 0,
+    contrastMaxVal: number = 100
+  ): Promise<RegionDiffractionResponse> => {
+    const response = await fetch(`${BACKEND_URL}/dataset/diffraction/region`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        mode,
+        region_type: regionType,
+        points,
+        log_scale: logScale,
+        contrast_min: contrastMinVal,
+        contrast_max: contrastMaxVal,
+      }),
+    })
+
+    if (!response.ok) {
+      const errorData = await response.json()
+      throw new Error(errorData.detail || `HTTP ${response.status}`)
+    }
+
+    return response.json()
+  }, [])
+
+  /**
    * Fetch calibration values from the backend.
    */
   const fetchCalibration = useCallback(async () => {
@@ -286,12 +328,11 @@ function App() {
   }, [])
 
   /**
-   * Handle click on the real space image.
-   * Converts click position to image coordinates and fetches diffraction pattern.
+   * Convert screen coordinates to image coordinates.
    */
-  const handleRealSpaceClick = useCallback(async (event: React.MouseEvent<HTMLImageElement>) => {
+  const screenToImageCoords = useCallback((event: React.MouseEvent<HTMLElement>): [number, number] | null => {
     const img = realSpaceImageRef.current
-    if (!img || !virtualImage) return
+    if (!img || !virtualImage) return null
 
     const rect = img.getBoundingClientRect()
 
@@ -305,75 +346,252 @@ function App() {
     let offsetY: number
 
     if (imgAspect > containerAspect) {
-      // Image is wider than container - width is limiting
       displayedWidth = rect.width
       displayedHeight = rect.width / imgAspect
       offsetX = 0
       offsetY = (rect.height - displayedHeight) / 2
     } else {
-      // Image is taller than container - height is limiting
       displayedHeight = rect.height
       displayedWidth = rect.height * imgAspect
       offsetX = (rect.width - displayedWidth) / 2
       offsetY = 0
     }
 
-    // Get click position relative to the image element
     const clickX = event.clientX - rect.left
     const clickY = event.clientY - rect.top
 
     // Check if click is within the actual image area
     if (clickX < offsetX || clickX > offsetX + displayedWidth ||
         clickY < offsetY || clickY > offsetY + displayedHeight) {
+      return null
+    }
+
+    const imageX = ((clickX - offsetX) / displayedWidth) * virtualImage.width
+    const imageY = ((clickY - offsetY) / displayedHeight) * virtualImage.height
+
+    return [imageX, imageY]
+  }, [virtualImage])
+
+  /**
+   * Handle mouse down on the real space image.
+   * Starts drawing selection or fetches diffraction pattern.
+   */
+  const handleRealSpaceMouseDown = useCallback((event: React.MouseEvent<HTMLDivElement>) => {
+    const coords = screenToImageCoords(event)
+    if (!coords) return
+
+    const [imageX, imageY] = coords
+
+    // If in Mean/Max mode with a selection tool, start drawing
+    if (diffractionViewMode !== 'live' && selectionTool) {
+      setIsDrawing(true)
+      setDrawingPoints([[imageX, imageY]])
+      event.preventDefault()
+    }
+  }, [screenToImageCoords, diffractionViewMode, selectionTool])
+
+  /**
+   * Handle mouse move on the real space image.
+   * Updates drawing preview.
+   */
+  const handleRealSpaceMouseMove = useCallback((event: React.MouseEvent<HTMLDivElement>) => {
+    if (!isDrawing) return
+
+    const coords = screenToImageCoords(event)
+    if (!coords) return
+
+    const [imageX, imageY] = coords
+
+    if (selectionTool === 'lasso') {
+      // For lasso, add point to the path
+      setDrawingPoints(prev => [...prev, [imageX, imageY]])
+    } else if (selectionTool === 'ellipse') {
+      // For circle, calculate radius as distance from center to current point
+      const [cx, cy] = drawingPoints[0]
+      const radius = Math.sqrt((imageX - cx) ** 2 + (imageY - cy) ** 2)
+      // Store edge point at angle 0 (to the right) for consistent radius
+      setDrawingPoints(prev => [prev[0], [cx + radius, cy]])
+    } else {
+      // For rectangle, update the second point
+      setDrawingPoints(prev => [prev[0], [imageX, imageY]])
+    }
+  }, [isDrawing, screenToImageCoords, selectionTool, drawingPoints])
+
+  /**
+   * Handle mouse up on the real space image.
+   * Completes drawing and triggers region diffraction fetch.
+   */
+  const handleRealSpaceMouseUp = useCallback(async (event: React.MouseEvent<HTMLDivElement>) => {
+    if (!isDrawing) return
+
+    const coords = screenToImageCoords(event)
+    if (!coords) {
+      setIsDrawing(false)
+      setDrawingPoints([])
       return
     }
 
-    // Convert to image coordinates
-    const imageX = Math.round(((clickX - offsetX) / displayedWidth) * virtualImage.width)
-    const imageY = Math.round(((clickY - offsetY) / displayedHeight) * virtualImage.height)
+    const [imageX, imageY] = coords
+    setIsDrawing(false)
+
+    // Finalize the selection
+    let finalPoints: [number, number][] = []
+    let regionType: 'rectangle' | 'ellipse' | 'polygon' = 'rectangle'
+
+    if (selectionTool === 'rectangle') {
+      if (drawingPoints.length >= 1) {
+        finalPoints = [drawingPoints[0], [imageX, imageY]]
+        regionType = 'rectangle'
+      }
+    } else if (selectionTool === 'ellipse') {
+      // For circle, calculate radius and store edge point
+      if (drawingPoints.length >= 1) {
+        const [cx, cy] = drawingPoints[0]
+        const radius = Math.sqrt((imageX - cx) ** 2 + (imageY - cy) ** 2)
+        finalPoints = [drawingPoints[0], [cx + radius, cy]]
+        regionType = 'ellipse'
+      }
+    } else if (selectionTool === 'lasso') {
+      finalPoints = [...drawingPoints, [imageX, imageY]]
+      regionType = 'polygon'
+    }
+
+    setDrawingPoints([])
+
+    // Validate selection has minimum size
+    if (finalPoints.length < 2) return
+    if (selectionTool === 'lasso' && finalPoints.length < 3) return
+
+    // For rectangle/ellipse, check minimum size
+    if (selectionTool !== 'lasso') {
+      const dx = Math.abs(finalPoints[1][0] - finalPoints[0][0])
+      const dy = Math.abs(finalPoints[1][1] - finalPoints[0][1])
+      if (dx < 2 && dy < 2) return
+    }
+
+    // Save the selection
+    const newSelection: SelectionGeometry = {
+      type: regionType,
+      points: finalPoints,
+    }
+    setSelection(newSelection)
+
+    // Fetch region diffraction
+    const mode = diffractionViewMode as 'mean' | 'max'
+    try {
+      const result = await fetchRegionDiffraction(
+        mode,
+        regionType,
+        finalPoints,
+        logScale,
+        contrastMin,
+        contrastMax
+      )
+      setRegionDiffraction(result)
+    } catch (err) {
+      console.error('Failed to fetch region diffraction:', err)
+    }
+  }, [isDrawing, screenToImageCoords, selectionTool, drawingPoints, diffractionViewMode, fetchRegionDiffraction, logScale, contrastMin, contrastMax])
+
+  /**
+   * Handle click on the real space image.
+   * In live mode, fetches diffraction pattern at clicked position.
+   */
+  const handleRealSpaceClick = useCallback(async (event: React.MouseEvent<HTMLImageElement>) => {
+    // Only handle click for live mode (drawing is handled by mouse up)
+    if (diffractionViewMode !== 'live') return
+
+    const coords = screenToImageCoords(event)
+    if (!coords) return
+
+    const [imageX, imageY] = coords.map(Math.round)
 
     setClickedPosition({ x: imageX, y: imageY })
 
-    // Only fetch diffraction pattern when in live mode
-    if (diffractionViewMode === 'live') {
-      try {
-        const pattern = await fetchDiffractionPattern(imageX, imageY, logScale, contrastMin, contrastMax)
-        setDiffractionPattern(pattern)
-      } catch (err) {
-        console.error('Failed to fetch diffraction pattern:', err)
+    try {
+      const pattern = await fetchDiffractionPattern(imageX, imageY, logScale, contrastMin, contrastMax)
+      setDiffractionPattern(pattern)
+    } catch (err) {
+      console.error('Failed to fetch diffraction pattern:', err)
+    }
+  }, [screenToImageCoords, diffractionViewMode, fetchDiffractionPattern, logScale, contrastMin, contrastMax])
+
+  /**
+   * Clear the current selection.
+   */
+  const handleClearSelection = useCallback(() => {
+    setSelection(null)
+    setRegionDiffraction(null)
+  }, [])
+
+  /**
+   * Handle keyboard shortcuts for selection tools.
+   */
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape' && selection) {
+        handleClearSelection()
       }
     }
-  }, [virtualImage, fetchDiffractionPattern, logScale, contrastMin, contrastMax, diffractionViewMode])
+
+    window.addEventListener('keydown', handleKeyDown)
+    return () => window.removeEventListener('keydown', handleKeyDown)
+  }, [selection, handleClearSelection])
 
   /**
    * Handle diffraction view mode change.
    * Fetches and caches mean/max patterns on first selection.
+   * Restores region selection when switching between Mean/Max modes.
    */
   const handleDiffractionViewModeChange = useCallback(async (mode: 'live' | 'mean' | 'max') => {
     setDiffractionViewMode(mode)
 
-    if (mode === 'mean') {
-      // Fetch and cache mean pattern if not already cached
-      if (!cachedMeanDiffraction) {
-        try {
-          const pattern = await fetchMeanDiffraction(logScale, contrastMin, contrastMax)
-          setCachedMeanDiffraction(pattern)
-        } catch (err) {
-          console.error('Failed to fetch mean diffraction:', err)
-        }
+    if (mode === 'live') {
+      // Clear region diffraction when switching to live mode
+      setRegionDiffraction(null)
+      return
+    }
+
+    // For Mean/Max mode, check if there's a selection and fetch region diffraction
+    if (selection) {
+      try {
+        const result = await fetchRegionDiffraction(
+          mode,
+          selection.type,
+          selection.points,
+          logScale,
+          contrastMin,
+          contrastMax
+        )
+        setRegionDiffraction(result)
+      } catch (err) {
+        console.error('Failed to fetch region diffraction:', err)
+        setRegionDiffraction(null)
       }
-    } else if (mode === 'max') {
-      // Fetch and cache max pattern if not already cached
-      if (!cachedMaxDiffraction) {
-        try {
-          const pattern = await fetchMaxDiffraction(logScale, contrastMin, contrastMax)
-          setCachedMaxDiffraction(pattern)
-        } catch (err) {
-          console.error('Failed to fetch max diffraction:', err)
+    } else {
+      // No selection - fetch whole-image mean/max
+      setRegionDiffraction(null)
+      if (mode === 'mean') {
+        if (!cachedMeanDiffraction) {
+          try {
+            const pattern = await fetchMeanDiffraction(logScale, contrastMin, contrastMax)
+            setCachedMeanDiffraction(pattern)
+          } catch (err) {
+            console.error('Failed to fetch mean diffraction:', err)
+          }
+        }
+      } else if (mode === 'max') {
+        if (!cachedMaxDiffraction) {
+          try {
+            const pattern = await fetchMaxDiffraction(logScale, contrastMin, contrastMax)
+            setCachedMaxDiffraction(pattern)
+          } catch (err) {
+            console.error('Failed to fetch max diffraction:', err)
+          }
         }
       }
     }
-  }, [cachedMeanDiffraction, cachedMaxDiffraction, fetchMeanDiffraction, fetchMaxDiffraction, logScale, contrastMin, contrastMax])
+  }, [selection, cachedMeanDiffraction, cachedMaxDiffraction, fetchMeanDiffraction, fetchMaxDiffraction, fetchRegionDiffraction, logScale, contrastMin, contrastMax])
 
   /**
    * Handle file selection from Electron.
@@ -389,6 +607,8 @@ function App() {
     setDiffractionViewMode('live')
     setClickedPosition(null)
     setDiffractionPattern(null)
+    setSelection(null)
+    setRegionDiffraction(null)
     setError(null)
     setShowPicker(false)
     setIsLoading(true)
@@ -396,9 +616,12 @@ function App() {
     try {
       const probeResult = await probeFile(filePath)
 
-      // Compute initial detector radii
-      const initialInner = detectorType === 'bf' ? 0 : adfInner
-      const initialOuter = detectorType === 'bf' ? bfRadius : adfOuter
+      // Compute initial detector type and radii
+      const effectiveType = detectorType === 'none' ? 'bf' : detectorType
+      const initialInner = detectorType === 'bf' || detectorType === 'none' ? 0 :
+                           detectorType === 'abf' ? abfInner : adfInner
+      const initialOuter = detectorType === 'bf' || detectorType === 'none' ? bfRadius :
+                           detectorType === 'abf' ? abfOuter : adfOuter
 
       if (probeResult.type === 'single') {
         // Single datacube - load directly
@@ -407,7 +630,7 @@ function App() {
         // Fetch images in parallel
         const [diffraction, virtual] = await Promise.all([
           fetchMeanDiffraction(logScale, contrastMin, contrastMax),
-          fetchVirtualImage(detectorType, initialInner, initialOuter, logScale, contrastMin, contrastMax),
+          fetchVirtualImage(effectiveType, initialInner, initialOuter, logScale, contrastMin, contrastMax),
         ])
         setMeanDiffraction(diffraction)
         setVirtualImage(virtual)
@@ -423,7 +646,7 @@ function App() {
           // Fetch images in parallel
           const [diffraction, virtual] = await Promise.all([
             fetchMeanDiffraction(logScale, contrastMin, contrastMax),
-            fetchVirtualImage(detectorType, initialInner, initialOuter, logScale, contrastMin, contrastMax),
+            fetchVirtualImage(effectiveType, initialInner, initialOuter, logScale, contrastMin, contrastMax),
           ])
           setMeanDiffraction(diffraction)
           setVirtualImage(virtual)
@@ -435,7 +658,7 @@ function App() {
           // Fetch images in parallel
           const [diffraction, virtual] = await Promise.all([
             fetchMeanDiffraction(logScale, contrastMin, contrastMax),
-            fetchVirtualImage(detectorType, initialInner, initialOuter, logScale, contrastMin, contrastMax),
+            fetchVirtualImage(effectiveType, initialInner, initialOuter, logScale, contrastMin, contrastMax),
           ])
           setMeanDiffraction(diffraction)
           setVirtualImage(virtual)
@@ -454,7 +677,7 @@ function App() {
     } finally {
       setIsLoading(false)
     }
-  }, [probeFile, loadDataset, fetchMeanDiffraction, fetchVirtualImage, fetchCalibration, logScale, contrastMin, contrastMax, detectorType, bfRadius, adfInner, adfOuter])
+  }, [probeFile, loadDataset, fetchMeanDiffraction, fetchVirtualImage, fetchCalibration, logScale, contrastMin, contrastMax, detectorType, bfRadius, abfInner, abfOuter, adfInner, adfOuter])
 
   /**
    * Handle dataset selection from the picker modal.
@@ -471,13 +694,16 @@ function App() {
     try {
       const info = await loadDataset(pendingFilePath, datasetPath)
       setDatasetInfo(info)
-      // Compute detector radii
-      const inner = detectorType === 'bf' ? 0 : adfInner
-      const outer = detectorType === 'bf' ? bfRadius : adfOuter
+      // Compute detector type and radii
+      const effectiveType = detectorType === 'none' ? 'bf' : detectorType
+      const inner = detectorType === 'bf' || detectorType === 'none' ? 0 :
+                    detectorType === 'abf' ? abfInner : adfInner
+      const outer = detectorType === 'bf' || detectorType === 'none' ? bfRadius :
+                    detectorType === 'abf' ? abfOuter : adfOuter
       // Fetch images in parallel
       const [diffraction, virtual] = await Promise.all([
         fetchMeanDiffraction(logScale, contrastMin, contrastMax),
-        fetchVirtualImage(detectorType, inner, outer, logScale, contrastMin, contrastMax),
+        fetchVirtualImage(effectiveType, inner, outer, logScale, contrastMin, contrastMax),
       ])
       setMeanDiffraction(diffraction)
       setVirtualImage(virtual)
@@ -489,7 +715,7 @@ function App() {
       setPendingFilePath(null)
       setHdf5Datasets([])
     }
-  }, [pendingFilePath, loadDataset, fetchMeanDiffraction, fetchVirtualImage, fetchCalibration, logScale, contrastMin, contrastMax, detectorType, bfRadius, adfInner, adfOuter])
+  }, [pendingFilePath, loadDataset, fetchMeanDiffraction, fetchVirtualImage, fetchCalibration, logScale, contrastMin, contrastMax, detectorType, bfRadius, abfInner, abfOuter, adfInner, adfOuter])
 
   /**
    * Compute detector inner/outer radii based on current settings.
@@ -507,7 +733,7 @@ function App() {
   /**
    * Get the effective detector type for API calls (maps 'none' to 'bf').
    */
-  const getEffectiveDetectorType = useCallback(() => {
+  const getEffectiveDetectorType = useCallback((): 'bf' | 'abf' | 'adf' => {
     return detectorType === 'none' ? 'bf' : detectorType
   }, [detectorType])
 
@@ -549,8 +775,9 @@ function App() {
     const refetchImages = async () => {
       try {
         const { inner, outer } = getDetectorRadii()
+        const effectiveType = getEffectiveDetectorType()
         // Refetch virtual image with current detector settings
-        const virtual = await fetchVirtualImage(detectorType, inner, outer, logScale, contrastMin, contrastMax)
+        const virtual = await fetchVirtualImage(effectiveType, inner, outer, logScale, contrastMin, contrastMax)
         setVirtualImage(virtual)
 
         // Refetch diffraction (either mean or at clicked position)
@@ -1155,16 +1382,64 @@ function App() {
             <div className="panel real-space">
               <div className="panel-header">
                 <span className="panel-label">Real Space</span>
+                {/* Selection tools - only visible in Mean/Max mode */}
+                {diffractionViewMode !== 'live' && (
+                  <div className="selection-tools">
+                    <button
+                      className={`selection-tool-btn ${selectionTool === 'rectangle' ? 'active' : ''}`}
+                      onClick={() => setSelectionTool('rectangle')}
+                      title="Rectangle selection"
+                    >
+                      ▢
+                    </button>
+                    <button
+                      className={`selection-tool-btn ${selectionTool === 'ellipse' ? 'active' : ''}`}
+                      onClick={() => setSelectionTool('ellipse')}
+                      title="Circle selection"
+                    >
+                      ◯
+                    </button>
+                    <button
+                      className={`selection-tool-btn ${selectionTool === 'lasso' ? 'active' : ''}`}
+                      onClick={() => setSelectionTool('lasso')}
+                      title="Lasso selection"
+                    >
+                      ✎
+                    </button>
+                    {selection && (
+                      <button
+                        className="selection-tool-btn clear-btn"
+                        onClick={handleClearSelection}
+                        title="Clear selection"
+                      >
+                        ✕
+                      </button>
+                    )}
+                  </div>
+                )}
               </div>
               <div className="panel-content">
                 {virtualImage && (
-                  <div className="panel-image-container">
+                  <div
+                    className="panel-image-container"
+                    style={{ cursor: diffractionViewMode !== 'live' && selectionTool ? 'crosshair' : undefined }}
+                    onMouseDown={handleRealSpaceMouseDown}
+                    onMouseMove={handleRealSpaceMouseMove}
+                    onMouseUp={handleRealSpaceMouseUp}
+                    onMouseLeave={() => {
+                      if (isDrawing) {
+                        setIsDrawing(false)
+                        setDrawingPoints([])
+                      }
+                    }}
+                  >
                     <img
                       ref={realSpaceImageRef}
                       className="panel-image clickable"
                       src={`data:image/png;base64,${virtualImage.image_base64}`}
                       alt="Virtual bright-field image"
                       onClick={handleRealSpaceClick}
+                      draggable={false}
                     />
                     <svg
                       style={{
@@ -1178,6 +1453,77 @@ function App() {
                       viewBox={`0 0 ${virtualImage.width} ${virtualImage.height}`}
                       preserveAspectRatio="xMidYMid meet"
                     >
+                      {/* Selection overlay - show only in Mean/Max mode */}
+                      {diffractionViewMode !== 'live' && selection && (
+                        <>
+                          {selection.type === 'rectangle' && selection.points.length >= 2 && (
+                            <rect
+                              x={Math.min(selection.points[0][0], selection.points[1][0])}
+                              y={Math.min(selection.points[0][1], selection.points[1][1])}
+                              width={Math.abs(selection.points[1][0] - selection.points[0][0])}
+                              height={Math.abs(selection.points[1][1] - selection.points[0][1])}
+                              fill="rgba(0, 200, 255, 0.3)"
+                              stroke="rgba(0, 200, 255, 0.9)"
+                              strokeWidth="1.5"
+                            />
+                          )}
+                          {selection.type === 'ellipse' && selection.points.length >= 2 && (
+                            <circle
+                              cx={selection.points[0][0]}
+                              cy={selection.points[0][1]}
+                              r={Math.abs(selection.points[1][0] - selection.points[0][0])}
+                              fill="rgba(0, 200, 255, 0.3)"
+                              stroke="rgba(0, 200, 255, 0.9)"
+                              strokeWidth="1.5"
+                            />
+                          )}
+                          {selection.type === 'polygon' && selection.points.length >= 3 && (
+                            <polygon
+                              points={selection.points.map(p => `${p[0]},${p[1]}`).join(' ')}
+                              fill="rgba(0, 200, 255, 0.3)"
+                              stroke="rgba(0, 200, 255, 0.9)"
+                              strokeWidth="1.5"
+                            />
+                          )}
+                        </>
+                      )}
+                      {/* Drawing preview */}
+                      {isDrawing && drawingPoints.length > 0 && (
+                        <>
+                          {selectionTool === 'rectangle' && drawingPoints.length >= 2 && (
+                            <rect
+                              x={Math.min(drawingPoints[0][0], drawingPoints[1][0])}
+                              y={Math.min(drawingPoints[0][1], drawingPoints[1][1])}
+                              width={Math.abs(drawingPoints[1][0] - drawingPoints[0][0])}
+                              height={Math.abs(drawingPoints[1][1] - drawingPoints[0][1])}
+                              fill="rgba(255, 220, 0, 0.3)"
+                              stroke="rgba(255, 220, 0, 0.9)"
+                              strokeWidth="1.5"
+                              strokeDasharray="4 2"
+                            />
+                          )}
+                          {selectionTool === 'ellipse' && drawingPoints.length >= 2 && (
+                            <circle
+                              cx={drawingPoints[0][0]}
+                              cy={drawingPoints[0][1]}
+                              r={Math.abs(drawingPoints[1][0] - drawingPoints[0][0])}
+                              fill="rgba(255, 220, 0, 0.3)"
+                              stroke="rgba(255, 220, 0, 0.9)"
+                              strokeWidth="1.5"
+                              strokeDasharray="4 2"
+                            />
+                          )}
+                          {selectionTool === 'lasso' && drawingPoints.length >= 2 && (
+                            <polyline
+                              points={drawingPoints.map(p => `${p[0]},${p[1]}`).join(' ')}
+                              fill="none"
+                              stroke="rgba(255, 220, 0, 0.9)"
+                              strokeWidth="1.5"
+                              strokeDasharray="4 2"
+                            />
+                          )}
+                        </>
+                      )}
                       {/* Atom positions overlay */}
                       {showAtomOverlay && atomPositions.map((pos, idx) => (
                         <circle
@@ -1190,8 +1536,8 @@ function App() {
                           strokeWidth="1.5"
                         />
                       ))}
-                      {/* Crosshair at clicked position */}
-                      {clickedPosition && (
+                      {/* Crosshair at clicked position - only in live mode */}
+                      {diffractionViewMode === 'live' && clickedPosition && (
                         <>
                           <line
                             x1={clickedPosition.x - 4}
@@ -1220,26 +1566,36 @@ function App() {
             <div className="panel reciprocal-space">
               <div className="panel-header">
                 <span className="panel-label">Reciprocal Space</span>
-                <select
-                  className="diffraction-mode-select"
-                  value={diffractionViewMode}
-                  onChange={(e) => handleDiffractionViewModeChange(e.target.value as 'live' | 'mean' | 'max')}
-                >
-                  <option value="live">Live</option>
-                  <option value="mean">Mean</option>
-                  <option value="max">Max</option>
-                </select>
+                <div className="diffraction-mode-container">
+                  <select
+                    className="diffraction-mode-select"
+                    value={diffractionViewMode}
+                    onChange={(e) => handleDiffractionViewModeChange(e.target.value as 'live' | 'mean' | 'max')}
+                  >
+                    <option value="live">Live</option>
+                    <option value="mean">Mean</option>
+                    <option value="max">Max</option>
+                  </select>
+                  {/* Region indicator */}
+                  {diffractionViewMode !== 'live' && regionDiffraction && (
+                    <span className="region-indicator" title={`${regionDiffraction.pixels_in_region} pixels selected`}>
+                      (region)
+                    </span>
+                  )}
+                </div>
               </div>
               <div className="panel-content">
                 {(() => {
                   // Determine which pattern to display based on view mode
-                  let pattern: MeanDiffractionResponse | DiffractionPatternResponse | null = null
+                  let pattern: MeanDiffractionResponse | DiffractionPatternResponse | RegionDiffractionResponse | null = null
                   if (diffractionViewMode === 'live') {
                     pattern = diffractionPattern || meanDiffraction
                   } else if (diffractionViewMode === 'mean') {
-                    pattern = cachedMeanDiffraction || meanDiffraction
+                    // Use region diffraction if available, otherwise use cached mean
+                    pattern = regionDiffraction || cachedMeanDiffraction || meanDiffraction
                   } else if (diffractionViewMode === 'max') {
-                    pattern = cachedMaxDiffraction
+                    // Use region diffraction if available, otherwise use cached max
+                    pattern = regionDiffraction || cachedMaxDiffraction
                   }
 
                   if (!pattern) return null

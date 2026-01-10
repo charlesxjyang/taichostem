@@ -1201,3 +1201,66 @@ html, body, #root {
   opacity: 0.5;
   cursor: not-allowed;
 }
+
+/* Selection Tools */
+.selection-tools {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  margin-left: 8px;
+}
+
+.selection-tool-btn {
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  background-color: #2d2d2d;
+  color: #888;
+  border: 1px solid #3d3d3d;
+  border-radius: 3px;
+  cursor: pointer;
+  font-size: 0.75rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background-color 0.15s, color 0.15s, border-color 0.15s;
+}
+
+.selection-tool-btn:hover {
+  background-color: #3d3d3d;
+  color: #ccc;
+}
+
+.selection-tool-btn.active {
+  background-color: #0066cc;
+  color: #fff;
+  border-color: #0066cc;
+}
+
+.selection-tool-btn.clear-btn {
+  margin-left: 4px;
+  color: #888;
+}
+
+.selection-tool-btn.clear-btn:hover {
+  background-color: #663333;
+  color: #ff6666;
+  border-color: #663333;
+}
+
+/* Diffraction mode container for alignment */
+.diffraction-mode-container {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* Region indicator in reciprocal space header */
+.region-indicator {
+  font-size: 0.65rem;
+  color: #4ade80;
+  font-weight: 500;
+  padding: 2px 6px;
+  background-color: rgba(74, 222, 128, 0.15);
+  border-radius: 3px;
+}

@@ -714,17 +714,19 @@ async def get_virtual_image(
         center_x, center_y = qx / 2, qy / 2
 
         # Use py4DSTEM's get_virtual_image method
+        # py4DSTEM expects geometry as ((qx, qy), radius) for circle
+        # and ((qx, qy), (inner_radius, outer_radius)) for annulus
         if type == "bf":
             # Bright-field: circular detector
             virtual_image = datacube.get_virtual_image(
                 mode="circle",
-                geometry=(center_x, center_y, outer),
+                geometry=((center_x, center_y), outer),
             )
         else:
             # ABF or ADF: annular detector
             virtual_image = datacube.get_virtual_image(
                 mode="annulus",
-                geometry=(center_x, center_y, inner, outer),
+                geometry=((center_x, center_y), (inner, outer)),
             )
 
         # Extract the data array from the VirtualImage object
@@ -842,6 +844,228 @@ async def get_diffraction_pattern(
         height=normalized.shape[0],
         x=x,
         y=y,
+    )
+
+
+# --- Region Diffraction Schemas ---
+
+
+class RegionDiffractionRequest(BaseModel):
+    """Request model for region-based diffraction pattern.
+
+    Supports three region types:
+    - rectangle: points contains [[x1,y1], [x2,y2]] (opposite corners)
+    - ellipse: points contains [[centerX, centerY], [edgeX, edgeY]]
+      where distance from center to edge defines semi-axes
+    - polygon: points contains array of [x,y] vertices
+    """
+
+    mode: Literal["mean", "max"]
+    region_type: Literal["rectangle", "ellipse", "polygon"]
+    points: list[list[float]]
+    log_scale: bool = False
+    contrast_min: float = 0.0
+    contrast_max: float = 100.0
+
+
+class RegionDiffractionResponse(BaseModel):
+    """Response model for region-based diffraction pattern."""
+
+    image_base64: str
+    width: int
+    height: int
+    mode: str
+    region_type: str
+    pixels_in_region: int
+
+
+def _create_region_mask(
+    region_type: str,
+    points: list[list[float]],
+    shape: tuple[int, int],
+) -> np.ndarray:
+    """
+    Create a boolean mask for the specified region.
+
+    Parameters
+    ----------
+    region_type : str
+        Type of region: "rectangle", "ellipse", or "polygon".
+    points : list[list[float]]
+        Points defining the region:
+        - rectangle: [[x1, y1], [x2, y2]] (opposite corners)
+        - ellipse: [[centerX, centerY], [edgeX, edgeY]]
+        - polygon: [[x1, y1], [x2, y2], ...] (vertices)
+    shape : tuple[int, int]
+        Shape of the output mask (height, width).
+
+    Returns
+    -------
+    np.ndarray
+        Boolean mask where True indicates pixels inside the region.
+    """
+    height, width = shape
+    mask = np.zeros((height, width), dtype=bool)
+
+    if region_type == "rectangle":
+        if len(points) < 2:
+            return mask
+        x1, y1 = points[0]
+        x2, y2 = points[1]
+        # Ensure proper ordering
+        x_min, x_max = int(min(x1, x2)), int(max(x1, x2))
+        y_min, y_max = int(min(y1, y2)), int(max(y1, y2))
+        # Clamp to image bounds
+        x_min = max(0, x_min)
+        x_max = min(width - 1, x_max)
+        y_min = max(0, y_min)
+        y_max = min(height - 1, y_max)
+        mask[y_min : y_max + 1, x_min : x_max + 1] = True
+
+    elif region_type == "ellipse":
+        if len(points) < 2:
+            return mask
+        center_x, center_y = points[0]
+        edge_x, edge_y = points[1]
+        # Calculate semi-axes from center to edge point
+        semi_axis_x = abs(edge_x - center_x)
+        semi_axis_y = abs(edge_y - center_y)
+        if semi_axis_x < 0.5 and semi_axis_y < 0.5:
+            return mask
+        # Create coordinate grids
+        y_coords, x_coords = np.ogrid[:height, :width]
+        # Ellipse equation: ((x-cx)/a)^2 + ((y-cy)/b)^2 <= 1
+        # Handle case where one axis is very small
+        if semi_axis_x < 0.5:
+            semi_axis_x = 0.5
+        if semi_axis_y < 0.5:
+            semi_axis_y = 0.5
+        ellipse_eq = (
+            ((x_coords - center_x) / semi_axis_x) ** 2
+            + ((y_coords - center_y) / semi_axis_y) ** 2
+        )
+        mask = ellipse_eq <= 1
+
+    elif region_type == "polygon":
+        if len(points) < 3:
+            return mask
+        try:
+            from matplotlib.path import Path
+
+            # Create a path from the polygon vertices
+            vertices = np.array(points)
+            path = Path(vertices)
+            # Create coordinate grid
+            x_coords, y_coords = np.meshgrid(np.arange(width), np.arange(height))
+            coords = np.column_stack([x_coords.ravel(), y_coords.ravel()])
+            # Check which points are inside
+            inside = path.contains_points(coords)
+            mask = inside.reshape((height, width))
+        except ImportError:
+            # Fallback: use a simple point-in-polygon algorithm
+            # (This is slower but doesn't require matplotlib)
+            from skimage.draw import polygon as draw_polygon
+
+            vertices = np.array(points)
+            rr, cc = draw_polygon(vertices[:, 1], vertices[:, 0], shape=shape)
+            mask[rr, cc] = True
+
+    return mask
+
+
+@app.post("/dataset/diffraction/region", response_model=RegionDiffractionResponse)
+async def get_region_diffraction(
+    request: RegionDiffractionRequest,
+) -> RegionDiffractionResponse:
+    """
+    Get mean or max diffraction pattern for a selected region.
+
+    Computes the mean or max of diffraction patterns only for pixels
+    within the specified region in real space.
+
+    Parameters
+    ----------
+    request : RegionDiffractionRequest
+        mode : "mean" or "max"
+        region_type : "rectangle", "ellipse", or "polygon"
+        points : Coordinates defining the region
+        log_scale : Apply log10 transform before display
+        contrast_min : Minimum percentile for contrast stretch
+        contrast_max : Maximum percentile for contrast stretch
+
+    Returns
+    -------
+    RegionDiffractionResponse
+        Base64-encoded PNG image and metadata.
+
+    Raises
+    ------
+    HTTPException
+        400 if no dataset is loaded or region is empty.
+    """
+    if _current_dataset is None:
+        raise HTTPException(
+            status_code=400,
+            detail="No dataset loaded. Load a dataset first using POST /dataset/load",
+        )
+
+    # Get real space dimensions
+    if _current_dataset.ndim == 4:
+        rx, ry, qx, qy = _current_dataset.shape
+    elif _current_dataset.ndim == 3:
+        rx, qx, qy = _current_dataset.shape
+        ry = 1
+    else:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Dataset must be 3D or 4D, got {_current_dataset.ndim}D",
+        )
+
+    # Create mask for the region
+    mask = _create_region_mask(request.region_type, request.points, (rx, ry))
+    pixels_in_region = int(np.sum(mask))
+
+    if pixels_in_region == 0:
+        raise HTTPException(
+            status_code=400,
+            detail="Selected region contains no pixels",
+        )
+
+    # Extract diffraction patterns for pixels in the region
+    if _current_dataset.ndim == 4:
+        # Get indices where mask is True
+        indices = np.argwhere(mask)
+        # Extract patterns at those positions
+        patterns = np.array([_current_dataset[i, j, :, :] for i, j in indices])
+    else:
+        indices = np.argwhere(mask[:, 0])
+        patterns = np.array([_current_dataset[i, :, :] for i in indices.flatten()])
+
+    # Compute mean or max
+    if request.mode == "mean":
+        result = np.mean(patterns, axis=0)
+    else:  # max
+        result = np.max(patterns, axis=0)
+
+    # Process for display
+    normalized = _process_image_for_display(
+        result, request.log_scale, request.contrast_min, request.contrast_max
+    )
+
+    # Convert to PNG
+    image = Image.fromarray(normalized, mode="L")
+    buffer = io.BytesIO()
+    image.save(buffer, format="PNG")
+    buffer.seek(0)
+    image_base64 = base64.b64encode(buffer.read()).decode("utf-8")
+
+    return RegionDiffractionResponse(
+        image_base64=image_base64,
+        width=normalized.shape[1],
+        height=normalized.shape[0],
+        mode=request.mode,
+        region_type=request.region_type,
+        pixels_in_region=pixels_in_region,
     )
 
 
