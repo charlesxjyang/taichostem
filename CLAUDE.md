@@ -15,7 +15,7 @@ Enterprise-grade visualization and analysis software for 4D-STEM microscopy data
 |----------|--------|-----------|
 | Desktop vs Web | Desktop app | 4D-STEM datasets are too large (1GB+) to stream; compute must stay close to data |
 | Frontend framework | Electron | Larger talent pool than Tauri, acceptable memory overhead for prototype, can migrate later if needed |
-| Backend | Python (FastAPI subprocess) | Native ecosystem for 4D-STEM (py4DSTEM, ptyrad, hyperspy); scientific community standard |
+| Backend | Python (FastAPI subprocess) | Native ecosystem for 4D-STEM (py4DSTEM, ptyrad, hyperspy); do NOT use numpy if py4DSTEM or other 4D STEM native open source packages have modules available |
 | IPC | HTTP to localhost | FastAPI on 127.0.0.1, simple and debuggable |
 
 ### Future Considerations
@@ -59,7 +59,7 @@ Enterprise-grade visualization and analysis software for 4D-STEM microscopy data
 
 Using a **1GB 4D-STEM dataset** for development and testing.
 
-Location: `data/demo/` (gitignored)
+Location: `raw_data/sim_Au_data_all_binned.h5/` (gitignored)
 
 When implementing features, always test against this dataset to ensure:
 - Memory usage stays reasonable (<2GB total app footprint)
