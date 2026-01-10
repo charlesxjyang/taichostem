@@ -981,7 +981,9 @@ async def get_region_diffraction(
     Get mean or max diffraction pattern for a selected region.
 
     Computes the mean or max of diffraction patterns only for pixels
-    within the specified region in real space.
+    within the specified region in real space. Uses py4DSTEM's
+    get_virtual_diffraction() method for efficient computation, with
+    a fallback to NumPy if py4DSTEM fails.
 
     Parameters
     ----------
@@ -1031,21 +1033,40 @@ async def get_region_diffraction(
             detail="Selected region contains no pixels",
         )
 
-    # Extract diffraction patterns for pixels in the region
-    if _current_dataset.ndim == 4:
-        # Get indices where mask is True
-        indices = np.argwhere(mask)
-        # Extract patterns at those positions
-        patterns = np.array([_current_dataset[i, j, :, :] for i, j in indices])
-    else:
-        indices = np.argwhere(mask[:, 0])
-        patterns = np.array([_current_dataset[i, :, :] for i in indices.flatten()])
+    # Compute diffraction pattern using py4DSTEM with fallback to NumPy
+    try:
+        # Create py4DSTEM DataCube and use get_virtual_diffraction
+        datacube = py4DSTEM.DataCube(data=_current_dataset)
+        
+        # Use py4DSTEM's get_virtual_diffraction method with mask
+        virtual_diffraction = datacube.get_virtual_diffraction(
+            method=request.mode,  # 'mean' or 'max'
+            mask=mask,
+            name=f"{request.region_type}_{request.mode}_diffraction",
+        )
+        
+        # Extract the data array from the DiffractionImage object
+        if hasattr(virtual_diffraction, "data"):
+            result = virtual_diffraction.data
+        else:
+            result = virtual_diffraction
+    
+    except Exception:
+        # Fallback to NumPy if py4DSTEM method fails
+        if _current_dataset.ndim == 4:
+            # Get indices where mask is True
+            indices = np.argwhere(mask)
+            # Extract patterns at those positions
+            patterns = np.array([_current_dataset[i, j, :, :] for i, j in indices])
+        else:
+            indices = np.argwhere(mask[:, 0])
+            patterns = np.array([_current_dataset[i, :, :] for i in indices.flatten()])
 
-    # Compute mean or max
-    if request.mode == "mean":
-        result = np.mean(patterns, axis=0)
-    else:  # max
-        result = np.max(patterns, axis=0)
+        # Compute mean or max
+        if request.mode == "mean":
+            result = np.mean(patterns, axis=0)
+        else:  # max
+            result = np.max(patterns, axis=0)
 
     # Process for display
     normalized = _process_image_for_display(

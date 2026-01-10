@@ -3,3 +3,7 @@ node_modules/
 dist-electron
 backend/venv
 .DS_Store/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
