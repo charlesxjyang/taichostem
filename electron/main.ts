@@ -7,7 +7,28 @@ process.env.DIST = path.join(__dirname, '../dist')
 process.env.VITE_PUBLIC = app.isPackaged ? process.env.DIST : path.join(process.env.DIST, '../public')
 
 let win: BrowserWindow | null
+let workflowWin: BrowserWindow | null = null
 let pythonProcess: ChildProcess | null = null
+
+// Shared state for workflow windows
+let currentDatasetInfo: {
+  filePath: string | null
+  datasetPath: string | null
+  shape: number[] | null
+} = {
+  filePath: null,
+  datasetPath: null,
+  shape: null,
+}
+
+// Current clicked position in real space (shared with workflow windows)
+let currentClickedPosition: { x: number; y: number } | null = null
+
+// Current selection geometry (shared with workflow windows)
+let currentSelection: {
+  type: 'rectangle' | 'ellipse' | 'polygon'
+  points: [number, number][]
+} | null = null
 
 const VITE_DEV_SERVER_URL = process.env['VITE_DEV_SERVER_URL']
 const BACKEND_PORT = 8000
@@ -67,6 +88,51 @@ function createWindow() {
     win.loadURL(VITE_DEV_SERVER_URL)
   } else {
     win.loadFile(path.join(process.env.DIST, 'index.html'))
+  }
+}
+
+/**
+ * Creates a workflow window for complex analysis workflows.
+ * @param workflowType - The type of workflow (e.g., 'disk-detection')
+ */
+function createWorkflowWindow(workflowType: string): void {
+  // If workflow window already exists, focus it
+  if (workflowWin && !workflowWin.isDestroyed()) {
+    workflowWin.focus()
+    return
+  }
+
+  workflowWin = new BrowserWindow({
+    width: 1200,
+    height: 800,
+    minWidth: 1000,
+    minHeight: 700,
+    title: 'Disk Detection Workflow',
+    webPreferences: {
+      preload: path.join(__dirname, 'preload.js'),
+    },
+  })
+
+  // Load the workflow window HTML
+  if (VITE_DEV_SERVER_URL) {
+    workflowWin.loadURL(`${VITE_DEV_SERVER_URL}workflow.html?type=${workflowType}`)
+  } else {
+    workflowWin.loadFile(path.join(process.env.DIST, 'workflow.html'), {
+      query: { type: workflowType },
+    })
+  }
+
+  workflowWin.on('closed', () => {
+    workflowWin = null
+    // Notify main window that workflow window closed
+    if (win && !win.isDestroyed()) {
+      win.webContents.send('workflow-window-closed')
+    }
+  })
+
+  // Notify main window that workflow window opened
+  if (win && !win.isDestroyed()) {
+    win.webContents.send('workflow-window-opened')
   }
 }
 
@@ -276,6 +342,63 @@ ipcMain.handle('load-detector-config', async () => {
   } catch (err) {
     return { success: false, error: (err as Error).message }
   }
+})
+
+// IPC handler for opening workflow window
+ipcMain.handle('open-workflow-window', (_event, workflowType: string) => {
+  createWorkflowWindow(workflowType)
+  return { success: true }
+})
+
+// IPC handler for updating dataset info (called by main window when dataset is loaded)
+ipcMain.handle('update-dataset-info', (_event, info: typeof currentDatasetInfo) => {
+  currentDatasetInfo = info
+  // Notify workflow window if it exists
+  if (workflowWin && !workflowWin.isDestroyed()) {
+    workflowWin.webContents.send('dataset-info-updated', currentDatasetInfo)
+  }
+  return { success: true }
+})
+
+// IPC handler for getting current dataset info (called by workflow window)
+ipcMain.handle('get-dataset-info', () => {
+  return currentDatasetInfo
+})
+
+// IPC handler for main window to send position clicks to workflow window
+ipcMain.on('position-clicked', (_event, position: { x: number; y: number }) => {
+  if (workflowWin && !workflowWin.isDestroyed()) {
+    workflowWin.webContents.send('position-clicked', position)
+  }
+})
+
+// IPC handler for workflow window to request position highlight in main window
+ipcMain.on('highlight-position', (_event, position: { x: number; y: number }) => {
+  if (win && !win.isDestroyed()) {
+    win.webContents.send('highlight-position', position)
+  }
+})
+
+// IPC handler for main window to update clicked position
+ipcMain.handle('update-clicked-position', (_event, position: { x: number; y: number } | null) => {
+  currentClickedPosition = position
+  return { success: true }
+})
+
+// IPC handler for workflow window to get current clicked position
+ipcMain.handle('get-clicked-position', () => {
+  return currentClickedPosition
+})
+
+// IPC handler for main window to update current selection
+ipcMain.handle('update-selection', (_event, selection: typeof currentSelection) => {
+  currentSelection = selection
+  return { success: true }
+})
+
+// IPC handler for workflow window to get current selection
+ipcMain.handle('get-selection', () => {
+  return currentSelection
 })
 
 app.whenReady().then(() => {

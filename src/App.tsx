@@ -1,9 +1,11 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { BackendStatus } from './components/BackendStatus'
 import { DatasetPickerModal } from './components/DatasetPickerModal'
+import { FileBrowserSidebar } from './components/FileBrowserSidebar'
 import type {
   ProbeResponse,
   HDF5DatasetInfo,
+  HDF5TreeProbeResponse,
   DatasetInfo,
   MeanDiffractionResponse,
   VirtualImageResponse,
@@ -25,6 +27,11 @@ function App() {
   const [showPicker, setShowPicker] = useState(false)
   const [pendingFilePath, setPendingFilePath] = useState<string | null>(null)
   const [hdf5Datasets, setHdf5Datasets] = useState<HDF5DatasetInfo[]>([])
+
+  // File browser sidebar state
+  const [fileBrowserCollapsed, setFileBrowserCollapsed] = useState(false)
+  const [fileTree, setFileTree] = useState<HDF5TreeProbeResponse | null>(null)
+  const [loadingDatasetPath, setLoadingDatasetPath] = useState<string | null>(null)
 
   // Mean diffraction image
   const [meanDiffraction, setMeanDiffraction] = useState<MeanDiffractionResponse | null>(null)
@@ -56,6 +63,7 @@ function App() {
 
   // Sidebar state
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
+  const [sidebarTab, setSidebarTab] = useState<'display' | 'detector' | 'preprocess'>('display')
 
   // Display controls (placeholder state - not yet functional)
   const [logScale, setLogScale] = useState(false)
@@ -80,29 +88,14 @@ function App() {
 
   // Workflow panel state
   const [workflowCollapsed, setWorkflowCollapsed] = useState(false)
-  const [workflowTab, setWorkflowTab] = useState<'virtual-detector' | 'atom-detection'>('virtual-detector')
+  const [workflowTab, setWorkflowTab] = useState<'virtual-detector' | 'disk-detection'>('virtual-detector')
 
-  // Atom detection controls
-  const [atomThreshold, setAtomThreshold] = useState(0.3)
-  const [atomMinDistance, setAtomMinDistance] = useState(5)
-  const [atomGaussianRefinement, setAtomGaussianRefinement] = useState(true)
-  const [atomDetectionResult, setAtomDetectionResult] = useState<string | null>(null)
-  const [atomDetectionLoading, setAtomDetectionLoading] = useState(false)
-  const [atomDetectionError, setAtomDetectionError] = useState<string | null>(null)
-  const [atomPositions, setAtomPositions] = useState<[number, number][]>([])
-  const [showAtomOverlay, setShowAtomOverlay] = useState(true)
-
-  // Filter hot pixels dialog state
-  const [showFilterHotPixelsDialog, setShowFilterHotPixelsDialog] = useState(false)
+  // Filter hot pixels state
   const [filterHotPixelsThresh, setFilterHotPixelsThresh] = useState(8)
   const [filterHotPixelsLoading, setFilterHotPixelsLoading] = useState(false)
 
-  // Calibration state
-  const [calibrationCollapsed, setCalibrationCollapsed] = useState(false)
-  const [qPixelSize, setQPixelSize] = useState(1.0)
-  const [qPixelUnits, setQPixelUnits] = useState('1/Å')
-  const [rPixelSize, setRPixelSize] = useState(1.0)
-  const [rPixelUnits, setRPixelUnits] = useState('Å')
+  // Workflow window open state (for enabling selection tools in live mode)
+  const [workflowWindowOpen, setWorkflowWindowOpen] = useState(false)
 
   /**
    * Probe a file to determine its structure.
@@ -287,47 +280,6 @@ function App() {
   }, [])
 
   /**
-   * Fetch calibration values from the backend.
-   */
-  const fetchCalibration = useCallback(async () => {
-    try {
-      const response = await fetch(`${BACKEND_URL}/dataset/calibration`)
-      if (response.ok) {
-        const data = await response.json()
-        setQPixelSize(data.q_pixel_size)
-        setQPixelUnits(data.q_pixel_units)
-        setRPixelSize(data.r_pixel_size)
-        setRPixelUnits(data.r_pixel_units)
-      }
-    } catch (err) {
-      console.error('Failed to fetch calibration:', err)
-    }
-  }, [])
-
-  /**
-   * Update calibration values on the backend.
-   */
-  const updateCalibration = useCallback(async (updates: {
-    q_pixel_size?: number
-    q_pixel_units?: string
-    r_pixel_size?: number
-    r_pixel_units?: string
-  }) => {
-    try {
-      const response = await fetch(`${BACKEND_URL}/dataset/calibration`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(updates),
-      })
-      if (!response.ok) {
-        console.error('Failed to update calibration')
-      }
-    } catch (err) {
-      console.error('Failed to update calibration:', err)
-    }
-  }, [])
-
-  /**
    * Convert screen coordinates to image coordinates.
    */
   const screenToImageCoords = useCallback((event: React.MouseEvent<HTMLElement>): [number, number] | null => {
@@ -382,13 +334,13 @@ function App() {
 
     const [imageX, imageY] = coords
 
-    // If in Mean/Max mode with a selection tool, start drawing
-    if (diffractionViewMode !== 'live' && selectionTool) {
+    // If a selection tool is active, start drawing
+    if (selectionTool) {
       setIsDrawing(true)
       setDrawingPoints([[imageX, imageY]])
       event.preventDefault()
     }
-  }, [screenToImageCoords, diffractionViewMode, selectionTool])
+  }, [screenToImageCoords, selectionTool])
 
   /**
    * Handle mouse move on the real space image.
@@ -476,20 +428,22 @@ function App() {
     }
     setSelection(newSelection)
 
-    // Fetch region diffraction
-    const mode = diffractionViewMode as 'mean' | 'max'
-    try {
-      const result = await fetchRegionDiffraction(
-        mode,
-        regionType,
-        finalPoints,
-        logScale,
-        contrastMin,
-        contrastMax
-      )
-      setRegionDiffraction(result)
-    } catch (err) {
-      console.error('Failed to fetch region diffraction:', err)
+    // Fetch region diffraction only in mean/max mode
+    if (diffractionViewMode !== 'live') {
+      const mode = diffractionViewMode as 'mean' | 'max'
+      try {
+        const result = await fetchRegionDiffraction(
+          mode,
+          regionType,
+          finalPoints,
+          logScale,
+          contrastMin,
+          contrastMax
+        )
+        setRegionDiffraction(result)
+      } catch (err) {
+        console.error('Failed to fetch region diffraction:', err)
+      }
     }
   }, [isDrawing, screenToImageCoords, selectionTool, drawingPoints, diffractionViewMode, fetchRegionDiffraction, logScale, contrastMin, contrastMax])
 
@@ -539,6 +493,20 @@ function App() {
   }, [selection, handleClearSelection])
 
   /**
+   * Sync clicked position to main process for workflow windows.
+   */
+  useEffect(() => {
+    window.electronAPI.updateClickedPosition(clickedPosition)
+  }, [clickedPosition])
+
+  /**
+   * Sync selection geometry with main process for workflow windows.
+   */
+  useEffect(() => {
+    window.electronAPI.updateSelection(selection)
+  }, [selection])
+
+  /**
    * Handle diffraction view mode change.
    * Fetches and caches mean/max patterns on first selection.
    * Restores region selection when switching between Mean/Max modes.
@@ -549,6 +517,10 @@ function App() {
     if (mode === 'live') {
       // Clear region diffraction when switching to live mode
       setRegionDiffraction(null)
+      // Clear selection if workflow window is not open
+      if (!workflowWindowOpen) {
+        setSelection(null)
+      }
       return
     }
 
@@ -591,7 +563,7 @@ function App() {
         }
       }
     }
-  }, [selection, cachedMeanDiffraction, cachedMaxDiffraction, fetchMeanDiffraction, fetchMaxDiffraction, fetchRegionDiffraction, logScale, contrastMin, contrastMax])
+  }, [selection, cachedMeanDiffraction, cachedMaxDiffraction, fetchMeanDiffraction, fetchMaxDiffraction, fetchRegionDiffraction, logScale, contrastMin, contrastMax, workflowWindowOpen])
 
   /**
    * Handle file selection from Electron.
@@ -611,6 +583,8 @@ function App() {
     setRegionDiffraction(null)
     setError(null)
     setShowPicker(false)
+    setFileTree(null)
+    setLoadingDatasetPath(null)
     setIsLoading(true)
 
     try {
@@ -624,7 +598,7 @@ function App() {
                            detectorType === 'abf' ? abfOuter : adfOuter
 
       if (probeResult.type === 'single') {
-        // Single datacube - load directly
+        // Single datacube - load directly (no tree to show)
         const info = await loadDataset(filePath)
         setDatasetInfo(info)
         // Fetch images in parallel
@@ -634,13 +608,18 @@ function App() {
         ])
         setMeanDiffraction(diffraction)
         setVirtualImage(virtual)
-        fetchCalibration()
       } else if (probeResult.type === 'hdf5_tree') {
-        // HDF5 file - check if we need to show picker
+        // HDF5 file - store tree for sidebar
+        setFileTree(probeResult)
+        setHdf5Datasets(probeResult.datasets)
+        setPendingFilePath(filePath)
+
+        // Check if we can auto-load
         const datasets4d = probeResult.datasets.filter(d => d.is_4d)
 
         if (datasets4d.length === 1) {
           // Only one 4D dataset - load it directly
+          setLoadingDatasetPath(datasets4d[0].path)
           const info = await loadDataset(filePath, datasets4d[0].path)
           setDatasetInfo(info)
           // Fetch images in parallel
@@ -650,9 +629,10 @@ function App() {
           ])
           setMeanDiffraction(diffraction)
           setVirtualImage(virtual)
-          fetchCalibration()
+          setLoadingDatasetPath(null)
         } else if (probeResult.datasets.length === 1) {
           // Only one dataset total - load it directly
+          setLoadingDatasetPath(probeResult.datasets[0].path)
           const info = await loadDataset(filePath, probeResult.datasets[0].path)
           setDatasetInfo(info)
           // Fetch images in parallel
@@ -662,22 +642,20 @@ function App() {
           ])
           setMeanDiffraction(diffraction)
           setVirtualImage(virtual)
-          fetchCalibration()
-        } else if (probeResult.datasets.length > 1) {
-          // Multiple datasets - show picker
-          setPendingFilePath(filePath)
-          setHdf5Datasets(probeResult.datasets)
-          setShowPicker(true)
-        } else {
-          throw new Error('No datasets found in HDF5 file')
+          setLoadingDatasetPath(null)
+        } else if (datasets4d.length === 0 && probeResult.datasets.length > 0) {
+          // No 4D datasets - show tree but don't auto-load
+          // User can still see the structure
         }
+        // If multiple 4D datasets, show tree and wait for user selection
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load dataset')
+      setLoadingDatasetPath(null)
     } finally {
       setIsLoading(false)
     }
-  }, [probeFile, loadDataset, fetchMeanDiffraction, fetchVirtualImage, fetchCalibration, logScale, contrastMin, contrastMax, detectorType, bfRadius, abfInner, abfOuter, adfInner, adfOuter])
+  }, [probeFile, loadDataset, fetchMeanDiffraction, fetchVirtualImage, logScale, contrastMin, contrastMax, detectorType, bfRadius, abfInner, abfOuter, adfInner, adfOuter])
 
   /**
    * Handle dataset selection from the picker modal.
@@ -707,7 +685,6 @@ function App() {
       ])
       setMeanDiffraction(diffraction)
       setVirtualImage(virtual)
-      fetchCalibration()
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load dataset')
     } finally {
@@ -715,7 +692,72 @@ function App() {
       setPendingFilePath(null)
       setHdf5Datasets([])
     }
-  }, [pendingFilePath, loadDataset, fetchMeanDiffraction, fetchVirtualImage, fetchCalibration, logScale, contrastMin, contrastMax, detectorType, bfRadius, abfInner, abfOuter, adfInner, adfOuter])
+  }, [pendingFilePath, loadDataset, fetchMeanDiffraction, fetchVirtualImage, logScale, contrastMin, contrastMax, detectorType, bfRadius, abfInner, abfOuter, adfInner, adfOuter])
+
+  /**
+   * Handle dataset selection from the file browser sidebar.
+   */
+  const handleFileBrowserDatasetSelect = useCallback(async (datasetPath: string) => {
+    if (!currentFile) return
+
+    setIsLoading(true)
+    setLoadingDatasetPath(datasetPath)
+    setError(null)
+    setMeanDiffraction(null)
+    setVirtualImage(null)
+    setCachedMeanDiffraction(null)
+    setCachedMaxDiffraction(null)
+    setDiffractionViewMode('live')
+    setClickedPosition(null)
+    setDiffractionPattern(null)
+    setSelection(null)
+    setRegionDiffraction(null)
+
+    try {
+      const info = await loadDataset(currentFile, datasetPath)
+      setDatasetInfo(info)
+      // Compute detector type and radii
+      const effectiveType = detectorType === 'none' ? 'bf' : detectorType
+      const inner = detectorType === 'bf' || detectorType === 'none' ? 0 :
+                    detectorType === 'abf' ? abfInner : adfInner
+      const outer = detectorType === 'bf' || detectorType === 'none' ? bfRadius :
+                    detectorType === 'abf' ? abfOuter : adfOuter
+      // Fetch images in parallel
+      const [diffraction, virtual] = await Promise.all([
+        fetchMeanDiffraction(logScale, contrastMin, contrastMax),
+        fetchVirtualImage(effectiveType, inner, outer, logScale, contrastMin, contrastMax),
+      ])
+      setMeanDiffraction(diffraction)
+      setVirtualImage(virtual)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to load dataset')
+    } finally {
+      setIsLoading(false)
+      setLoadingDatasetPath(null)
+    }
+  }, [currentFile, loadDataset, fetchMeanDiffraction, fetchVirtualImage, logScale, contrastMin, contrastMax, detectorType, bfRadius, abfInner, abfOuter, adfInner, adfOuter])
+
+  /**
+   * Handle refresh button in file browser - re-probes the current file.
+   */
+  const handleFileBrowserRefresh = useCallback(async () => {
+    if (!currentFile) return
+
+    setIsLoading(true)
+    setError(null)
+
+    try {
+      const probeResult = await probeFile(currentFile)
+      if (probeResult.type === 'hdf5_tree') {
+        setFileTree(probeResult)
+        setHdf5Datasets(probeResult.datasets)
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to probe file')
+    } finally {
+      setIsLoading(false)
+    }
+  }, [currentFile, probeFile])
 
   /**
    * Compute detector inner/outer radii based on current settings.
@@ -882,23 +924,6 @@ function App() {
   }, [])
 
   /**
-   * Export atom positions to CSV file.
-   */
-  const handleExportCsv = useCallback(async () => {
-    if (atomPositions.length === 0) return
-
-    // Build CSV content with header
-    const header = 'index,x,y'
-    const rows = atomPositions.map((pos, idx) => `${idx},${pos[0]},${pos[1]}`)
-    const csvContent = [header, ...rows].join('\n')
-
-    const result = await window.electronAPI.saveCsv(csvContent, 'atom-positions.csv')
-    if (!result.success && !result.canceled) {
-      console.error('Failed to export CSV:', result.error)
-    }
-  }, [atomPositions])
-
-  /**
    * Export the current virtual image as PNG.
    */
   const handleExportVirtualImage = useCallback(async () => {
@@ -930,45 +955,6 @@ function App() {
   }, [virtualImage, getDetectorRadii])
 
   /**
-   * Run atom detection on the current virtual image.
-   */
-  const handleRunAtomDetection = useCallback(async () => {
-    setAtomDetectionLoading(true)
-    setAtomDetectionError(null)
-    setAtomDetectionResult(null)
-    setAtomPositions([])
-
-    try {
-      const response = await fetch(`${BACKEND_URL}/analysis/find-atoms`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          threshold: atomThreshold,
-          min_distance: atomMinDistance,
-          refine: atomGaussianRefinement,
-        }),
-      })
-
-      if (!response.ok) {
-        const errorData = await response.json()
-        throw new Error(errorData.detail || `HTTP ${response.status}`)
-      }
-
-      const data: { count: number; positions: [number, number][] } = await response.json()
-      setAtomDetectionResult(`${data.count} atoms`)
-      setAtomPositions(data.positions)
-      setShowAtomOverlay(true)
-    } catch (err) {
-      const message = err instanceof Error ? err.message : 'Failed to detect atoms'
-      setAtomDetectionError(message)
-      setAtomDetectionResult(null)
-      setAtomPositions([])
-    } finally {
-      setAtomDetectionLoading(false)
-    }
-  }, [atomThreshold, atomMinDistance, atomGaussianRefinement])
-
-  /**
    * Run hot pixel filtering on the current dataset.
    */
   const handleFilterHotPixels = useCallback(async () => {
@@ -985,9 +971,6 @@ function App() {
         const errorData = await response.json()
         throw new Error(errorData.detail || `HTTP ${response.status}`)
       }
-
-      // Close dialog
-      setShowFilterHotPixelsDialog(false)
 
       // Refresh visualizations
       const { inner, outer } = getDetectorRadii()
@@ -1018,10 +1001,6 @@ function App() {
         setDiffractionPattern(pattern)
       }
 
-      // Clear atom positions since the data changed
-      setAtomPositions([])
-      setAtomDetectionResult(null)
-
     } catch (err) {
       console.error('Failed to filter hot pixels:', err)
       setError(err instanceof Error ? err.message : 'Failed to filter hot pixels')
@@ -1038,11 +1017,12 @@ function App() {
     }
   }, [handleFileSelected])
 
-  // Listen for filter hot pixels dialog trigger from menu
+  // Listen for filter hot pixels trigger from menu - switch to preprocess tab
   useEffect(() => {
     window.electronAPI.onShowFilterHotPixelsDialog(() => {
       if (datasetInfo) {
-        setShowFilterHotPixelsDialog(true)
+        setSidebarCollapsed(false)
+        setSidebarTab('preprocess')
       }
     })
 
@@ -1050,6 +1030,61 @@ function App() {
       window.electronAPI.removeFilterHotPixelsDialogListener()
     }
   }, [datasetInfo])
+
+  // Sync dataset info to main process for workflow windows
+  useEffect(() => {
+    window.electronAPI.updateDatasetInfo({
+      filePath: currentFile,
+      datasetPath: datasetInfo?.dataset_path ?? null,
+      shape: datasetInfo?.shape ?? null,
+    })
+  }, [currentFile, datasetInfo])
+
+  // Listen for workflow window open/close events
+  useEffect(() => {
+    window.electronAPI.onWorkflowWindowOpened(() => {
+      setWorkflowWindowOpen(true)
+    })
+    window.electronAPI.onWorkflowWindowClosed(() => {
+      setWorkflowWindowOpen(false)
+    })
+
+    return () => {
+      window.electronAPI.removeWorkflowWindowListeners()
+    }
+  }, [])
+
+  // Determine if selection tools should be active (enabled and functional)
+  // Active when: mean/max mode OR workflow window is open
+  const selectionToolsActive = diffractionViewMode !== 'live' || workflowWindowOpen
+
+  /**
+   * Calculate selection attributes for display.
+   */
+  const getSelectionAttributes = useCallback((): string | null => {
+    if (!selection) return null
+
+    if (selection.type === 'rectangle' && selection.points.length >= 2) {
+      const width = Math.abs(selection.points[1][0] - selection.points[0][0])
+      const height = Math.abs(selection.points[1][1] - selection.points[0][1])
+      return `${width.toFixed(0)} × ${height.toFixed(0)} px`
+    } else if (selection.type === 'ellipse' && selection.points.length >= 2) {
+      const radius = Math.abs(selection.points[1][0] - selection.points[0][0])
+      return `r = ${radius.toFixed(0)} px`
+    } else if (selection.type === 'polygon' && selection.points.length >= 3) {
+      // Calculate polygon area using shoelace formula
+      let area = 0
+      const n = selection.points.length
+      for (let i = 0; i < n; i++) {
+        const j = (i + 1) % n
+        area += selection.points[i][0] * selection.points[j][1]
+        area -= selection.points[j][0] * selection.points[i][1]
+      }
+      area = Math.abs(area) / 2
+      return `area = ${area.toFixed(0)} px²`
+    }
+    return null
+  }, [selection])
 
   const filename = currentFile ? currentFile.split('/').pop() ?? currentFile : null
 
@@ -1080,7 +1115,19 @@ function App() {
     <div className="app">
       <div className="menu-bar" />
       <div className="app-body">
-        {/* Collapsible Sidebar */}
+        {/* File Browser Sidebar */}
+        <FileBrowserSidebar
+          collapsed={fileBrowserCollapsed}
+          onToggleCollapse={() => setFileBrowserCollapsed(!fileBrowserCollapsed)}
+          fileTree={fileTree}
+          selectedDatasetPath={datasetInfo?.dataset_path ?? null}
+          isLoading={isLoading}
+          loadingDatasetPath={loadingDatasetPath}
+          onDatasetSelect={handleFileBrowserDatasetSelect}
+          onRefresh={handleFileBrowserRefresh}
+        />
+
+        {/* Collapsible Settings Sidebar */}
         <div className={`sidebar ${sidebarCollapsed ? 'collapsed' : ''}`}>
           <button
             className="sidebar-toggle"
@@ -1091,287 +1138,266 @@ function App() {
           </button>
           {!sidebarCollapsed && (
             <div className="sidebar-content">
-              <div className="sidebar-section">
-                <h3 className="sidebar-section-title">Display</h3>
-                <div className="sidebar-control">
-                  <label className="checkbox-label">
-                    <input
-                      type="checkbox"
-                      checked={logScale}
-                      onChange={(e) => setLogScale(e.target.checked)}
-                    />
-                    Log scale
-                  </label>
-                </div>
-                <div className="sidebar-control">
-                  <label className="slider-label">Contrast</label>
-                  <div className="contrast-sliders">
-                    <div className="slider-row">
-                      <span className="slider-label-small">Min</span>
-                      <input
-                        type="range"
-                        min="0"
-                        max="100"
-                        value={contrastMin}
-                        onChange={(e) => {
-                          const newMin = Number(e.target.value)
-                          setContrastMin(newMin)
-                          // Ensure max stays above min
-                          if (newMin >= contrastMax) {
-                            setContrastMax(Math.min(100, newMin + 1))
-                          }
-                        }}
-                        className="slider"
-                      />
-                      <span className="slider-value">{contrastMin}</span>
-                    </div>
-                    <div className="slider-row">
-                      <span className="slider-label-small">Max</span>
-                      <input
-                        type="range"
-                        min="0"
-                        max="100"
-                        value={contrastMax}
-                        onChange={(e) => {
-                          const newMax = Number(e.target.value)
-                          setContrastMax(newMax)
-                          // Ensure min stays below max
-                          if (newMax <= contrastMin) {
-                            setContrastMin(Math.max(0, newMax - 1))
-                          }
-                        }}
-                        className="slider"
-                      />
-                      <span className="slider-value">{contrastMax}</span>
-                    </div>
-                  </div>
-                </div>
-              </div>
-
-              {/* Detector Section */}
-              <div className="sidebar-section">
-                <h3 className="sidebar-section-title">Detector</h3>
-                <div className="sidebar-control">
-                  <div className="radio-group detector-radio-group">
-                    <label className="radio-label" title="Bright Field - center disk">
-                      <input
-                        type="radio"
-                        name="detector"
-                        value="bf"
-                        checked={detectorType === 'bf'}
-                        onChange={() => setDetectorType('bf')}
-                      />
-                      BF
-                    </label>
-                    <label className="radio-label" title="Annular Bright Field - just outside BF">
-                      <input
-                        type="radio"
-                        name="detector"
-                        value="abf"
-                        checked={detectorType === 'abf'}
-                        onChange={() => setDetectorType('abf')}
-                      />
-                      ABF
-                    </label>
-                    <label className="radio-label" title="Annular Dark Field - outer ring">
-                      <input
-                        type="radio"
-                        name="detector"
-                        value="adf"
-                        checked={detectorType === 'adf'}
-                        onChange={() => setDetectorType('adf')}
-                      />
-                      ADF
-                    </label>
-                  </div>
-                </div>
-
-                {detectorType === 'bf' && (
-                  <div className="sidebar-control">
-                    <div className="slider-row">
-                      <span className="slider-label-small">Radius</span>
-                      <input
-                        type="range"
-                        min="1"
-                        max="100"
-                        value={bfRadius}
-                        onChange={(e) => setBfRadius(Number(e.target.value))}
-                        className="slider"
-                      />
-                      <span className="slider-value">{bfRadius}</span>
-                    </div>
-                  </div>
-                )}
-
-                {detectorType === 'abf' && (
-                  <div className="sidebar-control">
-                    <div className="contrast-sliders">
-                      <div className="slider-row">
-                        <span className="slider-label-small">Inner</span>
-                        <input
-                          type="range"
-                          min="0"
-                          max="100"
-                          value={abfInner}
-                          onChange={(e) => {
-                            const newInner = Number(e.target.value)
-                            setAbfInner(newInner)
-                            if (newInner >= abfOuter) {
-                              setAbfOuter(Math.min(100, newInner + 1))
-                            }
-                          }}
-                          className="slider"
-                        />
-                        <span className="slider-value">{abfInner}</span>
-                      </div>
-                      <div className="slider-row">
-                        <span className="slider-label-small">Outer</span>
-                        <input
-                          type="range"
-                          min="1"
-                          max="100"
-                          value={abfOuter}
-                          onChange={(e) => {
-                            const newOuter = Number(e.target.value)
-                            setAbfOuter(newOuter)
-                            if (newOuter <= abfInner) {
-                              setAbfInner(Math.max(0, newOuter - 1))
-                            }
-                          }}
-                          className="slider"
-                        />
-                        <span className="slider-value">{abfOuter}</span>
-                      </div>
-                    </div>
-                  </div>
-                )}
-
-                {detectorType === 'adf' && (
-                  <div className="sidebar-control">
-                    <div className="contrast-sliders">
-                      <div className="slider-row">
-                        <span className="slider-label-small">Inner</span>
-                        <input
-                          type="range"
-                          min="0"
-                          max="100"
-                          value={adfInner}
-                          onChange={(e) => {
-                            const newInner = Number(e.target.value)
-                            setAdfInner(newInner)
-                            if (newInner >= adfOuter) {
-                              setAdfOuter(Math.min(100, newInner + 1))
-                            }
-                          }}
-                          className="slider"
-                        />
-                        <span className="slider-value">{adfInner}</span>
-                      </div>
-                      <div className="slider-row">
-                        <span className="slider-label-small">Outer</span>
-                        <input
-                          type="range"
-                          min="1"
-                          max="100"
-                          value={adfOuter}
-                          onChange={(e) => {
-                            const newOuter = Number(e.target.value)
-                            setAdfOuter(newOuter)
-                            if (newOuter <= adfInner) {
-                              setAdfInner(Math.max(0, newOuter - 1))
-                            }
-                          }}
-                          className="slider"
-                        />
-                        <span className="slider-value">{adfOuter}</span>
-                      </div>
-                    </div>
-                  </div>
-                )}
-              </div>
-
-              {/* Calibration Section */}
-              <div className="sidebar-section">
-                <div
-                  className="sidebar-section-header"
-                  onClick={() => setCalibrationCollapsed(!calibrationCollapsed)}
+              {/* Sidebar Tabs */}
+              <div className="sidebar-tabs">
+                <button
+                  className={`sidebar-tab ${sidebarTab === 'display' ? 'active' : ''}`}
+                  onClick={() => setSidebarTab('display')}
                 >
-                  <h3 className="sidebar-section-title">Calibration</h3>
-                  <span className="sidebar-collapse-icon">
-                    {calibrationCollapsed ? '+' : '−'}
-                  </span>
-                </div>
-                {!calibrationCollapsed && (
-                  <div className="calibration-content">
-                    <div className="calibration-group">
-                      <label className="calibration-label">Q (Reciprocal)</label>
-                      <div className="calibration-row">
+                  Display
+                </button>
+                <button
+                  className={`sidebar-tab ${sidebarTab === 'detector' ? 'active' : ''}`}
+                  onClick={() => setSidebarTab('detector')}
+                >
+                  Detector
+                </button>
+                <button
+                  className={`sidebar-tab ${sidebarTab === 'preprocess' ? 'active' : ''}`}
+                  onClick={() => setSidebarTab('preprocess')}
+                >
+                  Preprocess
+                </button>
+              </div>
+
+              {/* Display Tab Content */}
+              {sidebarTab === 'display' && (
+                <div className="sidebar-tab-content">
+                  <div className="sidebar-control">
+                    <label className="checkbox-label">
+                      <input
+                        type="checkbox"
+                        checked={logScale}
+                        onChange={(e) => setLogScale(e.target.checked)}
+                      />
+                      Log scale
+                    </label>
+                  </div>
+                  <div className="sidebar-control">
+                    <label className="slider-label">Contrast</label>
+                    <div className="contrast-sliders">
+                      <div className="slider-row">
+                        <span className="slider-label-small">Min</span>
                         <input
-                          type="number"
-                          className="calibration-input"
-                          value={qPixelSize}
+                          type="range"
+                          min="0"
+                          max="100"
+                          value={contrastMin}
                           onChange={(e) => {
-                            const val = Number(e.target.value)
-                            if (val > 0) {
-                              setQPixelSize(val)
-                              updateCalibration({ q_pixel_size: val })
+                            const newMin = Number(e.target.value)
+                            setContrastMin(newMin)
+                            if (newMin >= contrastMax) {
+                              setContrastMax(Math.min(100, newMin + 1))
                             }
                           }}
-                          step="0.001"
-                          min="0.001"
-                          disabled={!datasetInfo}
+                          className="slider"
                         />
-                        <select
-                          className="calibration-select"
-                          value={qPixelUnits}
-                          onChange={(e) => {
-                            setQPixelUnits(e.target.value)
-                            updateCalibration({ q_pixel_units: e.target.value })
-                          }}
-                          disabled={!datasetInfo}
-                        >
-                          <option value="1/Å">1/Å</option>
-                          <option value="1/nm">1/nm</option>
-                          <option value="mrad">mrad</option>
-                        </select>
+                        <span className="slider-value">{contrastMin}</span>
                       </div>
-                    </div>
-                    <div className="calibration-group">
-                      <label className="calibration-label">R (Real Space)</label>
-                      <div className="calibration-row">
+                      <div className="slider-row">
+                        <span className="slider-label-small">Max</span>
                         <input
-                          type="number"
-                          className="calibration-input"
-                          value={rPixelSize}
+                          type="range"
+                          min="0"
+                          max="100"
+                          value={contrastMax}
                           onChange={(e) => {
-                            const val = Number(e.target.value)
-                            if (val > 0) {
-                              setRPixelSize(val)
-                              updateCalibration({ r_pixel_size: val })
+                            const newMax = Number(e.target.value)
+                            setContrastMax(newMax)
+                            if (newMax <= contrastMin) {
+                              setContrastMin(Math.max(0, newMax - 1))
                             }
                           }}
-                          step="0.001"
-                          min="0.001"
-                          disabled={!datasetInfo}
+                          className="slider"
                         />
-                        <select
-                          className="calibration-select"
-                          value={rPixelUnits}
-                          onChange={(e) => {
-                            setRPixelUnits(e.target.value)
-                            updateCalibration({ r_pixel_units: e.target.value })
-                          }}
-                          disabled={!datasetInfo}
-                        >
-                          <option value="Å">Å</option>
-                          <option value="nm">nm</option>
-                          <option value="pm">pm</option>
-                        </select>
+                        <span className="slider-value">{contrastMax}</span>
                       </div>
                     </div>
                   </div>
-                )}
-              </div>
+                </div>
+              )}
+
+              {/* Detector Tab Content */}
+              {sidebarTab === 'detector' && (
+                <div className="sidebar-tab-content">
+                  <div className="sidebar-control">
+                    <div className="radio-group detector-radio-group">
+                      <label className="radio-label" title="Bright Field - center disk">
+                        <input
+                          type="radio"
+                          name="detector"
+                          value="bf"
+                          checked={detectorType === 'bf'}
+                          onChange={() => setDetectorType('bf')}
+                        />
+                        BF
+                      </label>
+                      <label className="radio-label" title="Annular Bright Field - just outside BF">
+                        <input
+                          type="radio"
+                          name="detector"
+                          value="abf"
+                          checked={detectorType === 'abf'}
+                          onChange={() => setDetectorType('abf')}
+                        />
+                        ABF
+                      </label>
+                      <label className="radio-label" title="Annular Dark Field - outer ring">
+                        <input
+                          type="radio"
+                          name="detector"
+                          value="adf"
+                          checked={detectorType === 'adf'}
+                          onChange={() => setDetectorType('adf')}
+                        />
+                        ADF
+                      </label>
+                    </div>
+                  </div>
+
+                  {detectorType === 'bf' && (
+                    <div className="sidebar-control">
+                      <div className="slider-row">
+                        <span className="slider-label-small">Radius</span>
+                        <input
+                          type="range"
+                          min="1"
+                          max="100"
+                          value={bfRadius}
+                          onChange={(e) => setBfRadius(Number(e.target.value))}
+                          className="slider"
+                        />
+                        <span className="slider-value">{bfRadius}</span>
+                      </div>
+                    </div>
+                  )}
+
+                  {detectorType === 'abf' && (
+                    <div className="sidebar-control">
+                      <div className="contrast-sliders">
+                        <div className="slider-row">
+                          <span className="slider-label-small">Inner</span>
+                          <input
+                            type="range"
+                            min="0"
+                            max="100"
+                            value={abfInner}
+                            onChange={(e) => {
+                              const newInner = Number(e.target.value)
+                              setAbfInner(newInner)
+                              if (newInner >= abfOuter) {
+                                setAbfOuter(Math.min(100, newInner + 1))
+                              }
+                            }}
+                            className="slider"
+                          />
+                          <span className="slider-value">{abfInner}</span>
+                        </div>
+                        <div className="slider-row">
+                          <span className="slider-label-small">Outer</span>
+                          <input
+                            type="range"
+                            min="1"
+                            max="100"
+                            value={abfOuter}
+                            onChange={(e) => {
+                              const newOuter = Number(e.target.value)
+                              setAbfOuter(newOuter)
+                              if (newOuter <= abfInner) {
+                                setAbfInner(Math.max(0, newOuter - 1))
+                              }
+                            }}
+                            className="slider"
+                          />
+                          <span className="slider-value">{abfOuter}</span>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
+                  {detectorType === 'adf' && (
+                    <div className="sidebar-control">
+                      <div className="contrast-sliders">
+                        <div className="slider-row">
+                          <span className="slider-label-small">Inner</span>
+                          <input
+                            type="range"
+                            min="0"
+                            max="100"
+                            value={adfInner}
+                            onChange={(e) => {
+                              const newInner = Number(e.target.value)
+                              setAdfInner(newInner)
+                              if (newInner >= adfOuter) {
+                                setAdfOuter(Math.min(100, newInner + 1))
+                              }
+                            }}
+                            className="slider"
+                          />
+                          <span className="slider-value">{adfInner}</span>
+                        </div>
+                        <div className="slider-row">
+                          <span className="slider-label-small">Outer</span>
+                          <input
+                            type="range"
+                            min="1"
+                            max="100"
+                            value={adfOuter}
+                            onChange={(e) => {
+                              const newOuter = Number(e.target.value)
+                              setAdfOuter(newOuter)
+                              if (newOuter <= adfInner) {
+                                setAdfInner(Math.max(0, newOuter - 1))
+                              }
+                            }}
+                            className="slider"
+                          />
+                          <span className="slider-value">{adfOuter}</span>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Preprocess Tab Content */}
+              {sidebarTab === 'preprocess' && (
+                <div className="sidebar-tab-content">
+                  <div className="sidebar-control">
+                    <label className="sidebar-control-label">Filter Hot Pixels</label>
+                    <p className="sidebar-control-description">
+                      Remove anomalously bright pixels from the dataset.
+                    </p>
+                    <div className="preprocess-row">
+                      <label className="slider-label-small">Threshold (σ)</label>
+                      <input
+                        type="number"
+                        className="preprocess-input"
+                        value={filterHotPixelsThresh}
+                        onChange={(e) => setFilterHotPixelsThresh(Number(e.target.value))}
+                        min={1}
+                        max={20}
+                        step={0.5}
+                        disabled={filterHotPixelsLoading || !datasetInfo}
+                      />
+                    </div>
+                    <button
+                      className="preprocess-apply-button"
+                      onClick={handleFilterHotPixels}
+                      disabled={filterHotPixelsLoading || !datasetInfo}
+                    >
+                      {filterHotPixelsLoading ? (
+                        <>
+                          <span className="loading-spinner" />
+                          Filtering...
+                        </>
+                      ) : (
+                        'Apply Filter'
+                      )}
+                    </button>
+                  </div>
+                </div>
+              )}
             </div>
           )}
         </div>
@@ -1382,50 +1408,54 @@ function App() {
             <div className="panel real-space">
               <div className="panel-header">
                 <span className="panel-label">Real Space</span>
-                {/* Selection tools - only visible in Mean/Max mode */}
-                {diffractionViewMode !== 'live' && (
-                  <div className="selection-tools">
+                {/* Selection tools - always visible, but only active in mean/max mode or when workflow window is open */}
+                <div className="selection-tools">
+                  <button
+                    className={`selection-tool-btn ${selectionToolsActive && selectionTool === 'rectangle' ? 'active' : ''}`}
+                    onClick={() => setSelectionTool('rectangle')}
+                    title="Rectangle selection"
+                  >
+                    ▢
+                  </button>
+                  <button
+                    className={`selection-tool-btn ${selectionToolsActive && selectionTool === 'ellipse' ? 'active' : ''}`}
+                    onClick={() => setSelectionTool('ellipse')}
+                    title="Circle selection"
+                  >
+                    ◯
+                  </button>
+                  <button
+                    className={`selection-tool-btn ${selectionToolsActive && selectionTool === 'lasso' ? 'active' : ''}`}
+                    onClick={() => setSelectionTool('lasso')}
+                    title="Lasso selection"
+                  >
+                    ✎
+                  </button>
+                  {selectionToolsActive && selection && (
                     <button
-                      className={`selection-tool-btn ${selectionTool === 'rectangle' ? 'active' : ''}`}
-                      onClick={() => setSelectionTool('rectangle')}
-                      title="Rectangle selection"
+                      className="selection-tool-btn clear-btn"
+                      onClick={handleClearSelection}
+                      title="Clear selection"
                     >
-                      ▢
+                      ✕
                     </button>
-                    <button
-                      className={`selection-tool-btn ${selectionTool === 'ellipse' ? 'active' : ''}`}
-                      onClick={() => setSelectionTool('ellipse')}
-                      title="Circle selection"
-                    >
-                      ◯
-                    </button>
-                    <button
-                      className={`selection-tool-btn ${selectionTool === 'lasso' ? 'active' : ''}`}
-                      onClick={() => setSelectionTool('lasso')}
-                      title="Lasso selection"
-                    >
-                      ✎
-                    </button>
-                    {selection && (
-                      <button
-                        className="selection-tool-btn clear-btn"
-                        onClick={handleClearSelection}
-                        title="Clear selection"
-                      >
-                        ✕
-                      </button>
-                    )}
-                  </div>
-                )}
+                  )}
+                </div>
               </div>
+              {/* Selection attributes - shown below panel header */}
+              {selectionToolsActive && selection && (
+                <div className="selection-info-bar">
+                  <span className="selection-attributes">{getSelectionAttributes()}</span>
+                </div>
+              )}
               <div className="panel-content">
                 {virtualImage && (
                   <div
                     className="panel-image-container"
-                    style={{ cursor: diffractionViewMode !== 'live' && selectionTool ? 'crosshair' : undefined }}
-                    onMouseDown={handleRealSpaceMouseDown}
-                    onMouseMove={handleRealSpaceMouseMove}
-                    onMouseUp={handleRealSpaceMouseUp}
+                    style={{ cursor: selectionToolsActive && selectionTool ? 'crosshair' : undefined }}
+                    onMouseDown={selectionToolsActive ? handleRealSpaceMouseDown : undefined}
+                    onMouseMove={selectionToolsActive ? handleRealSpaceMouseMove : undefined}
+                    onMouseUp={selectionToolsActive ? handleRealSpaceMouseUp : undefined}
                     onMouseLeave={() => {
                       if (isDrawing) {
                         setIsDrawing(false)
@@ -1453,8 +1483,8 @@ function App() {
                       viewBox={`0 0 ${virtualImage.width} ${virtualImage.height}`}
                       preserveAspectRatio="xMidYMid meet"
                     >
-                      {/* Selection overlay - show only in Mean/Max mode */}
-                      {diffractionViewMode !== 'live' && selection && (
+                      {/* Selection overlay - show only when selection tools are active */}
+                      {selectionToolsActive && selection && (
                         <>
                           {selection.type === 'rectangle' && selection.points.length >= 2 && (
                             <rect
@@ -1487,8 +1517,8 @@ function App() {
                           )}
                         </>
                       )}
-                      {/* Drawing preview */}
-                      {isDrawing && drawingPoints.length > 0 && (
+                      {/* Drawing preview - only when selection tools are active */}
+                      {selectionToolsActive && isDrawing && drawingPoints.length > 0 && (
                         <>
                           {selectionTool === 'rectangle' && drawingPoints.length >= 2 && (
                             <rect
@@ -1524,18 +1554,6 @@ function App() {
                           )}
                         </>
                       )}
-                      {/* Atom positions overlay */}
-                      {showAtomOverlay && atomPositions.map((pos, idx) => (
-                        <circle
-                          key={idx}
-                          cx={pos[0]}
-                          cy={pos[1]}
-                          r={3}
-                          fill="none"
-                          stroke="#ff3333"
-                          strokeWidth="1.5"
-                        />
-                      ))}
                       {/* Crosshair at clicked position - only in live mode */}
                       {diffractionViewMode === 'live' && clickedPosition && (
                         <>
@@ -1624,51 +1642,68 @@ function App() {
                           const centerX = pattern.width / 2 + centerOffsetX
                           const centerY = pattern.height / 2 + centerOffsetY
 
+                          // Clip path to constrain detector overlay to image bounds
+                          const clipPathId = 'detector-clip'
+
                           if (detectorType === 'bf') {
                             // BF: filled semi-transparent circle
                             return (
-                              <circle
-                                cx={centerX}
-                                cy={centerY}
-                                r={bfRadius}
-                                fill={colors.fill}
-                                stroke={colors.stroke}
-                                strokeWidth="1"
-                              />
+                              <>
+                                <defs>
+                                  <clipPath id={clipPathId}>
+                                    <rect x="0" y="0" width={pattern.width} height={pattern.height} />
+                                  </clipPath>
+                                </defs>
+                                <g clipPath={`url(#${clipPathId})`}>
+                                  <circle
+                                    cx={centerX}
+                                    cy={centerY}
+                                    r={bfRadius}
+                                    fill={colors.fill}
+                                    stroke={colors.stroke}
+                                    strokeWidth="1"
+                                  />
+                                </g>
+                              </>
                             )
                           } else if (detectorType === 'abf') {
                             // ABF: semi-transparent annulus
                             return (
                               <>
                                 <defs>
+                                  <clipPath id={clipPathId}>
+                                    <rect x="0" y="0" width={pattern.width} height={pattern.height} />
+                                  </clipPath>
                                   <mask id="abf-annulus-mask">
                                     <rect width="100%" height="100%" fill="white" />
                                     <circle cx={centerX} cy={centerY} r={abfInner} fill="black" />
                                   </mask>
                                 </defs>
-                                <circle
-                                  cx={centerX}
-                                  cy={centerY}
-                                  r={abfOuter}
-                                  fill={colors.fill}
-                                  mask="url(#abf-annulus-mask)"
-                                />
-                                <circle
-                                  cx={centerX}
-                                  cy={centerY}
-                                  r={abfOuter}
-                                  fill="none"
-                                  stroke={colors.stroke}
-                                  strokeWidth="1"
-                                />
-                                <circle
-                                  cx={centerX}
-                                  cy={centerY}
-                                  r={abfInner}
-                                  fill="none"
-                                  stroke={colors.stroke}
-                                  strokeWidth="1"
-                                />
+                                <g clipPath={`url(#${clipPathId})`}>
+                                  <circle
+                                    cx={centerX}
+                                    cy={centerY}
+                                    r={abfOuter}
+                                    fill={colors.fill}
+                                    mask="url(#abf-annulus-mask)"
+                                  />
+                                  <circle
+                                    cx={centerX}
+                                    cy={centerY}
+                                    r={abfOuter}
+                                    fill="none"
+                                    stroke={colors.stroke}
+                                    strokeWidth="1"
+                                  />
+                                  <circle
+                                    cx={centerX}
+                                    cy={centerY}
+                                    r={abfInner}
+                                    fill="none"
+                                    stroke={colors.stroke}
+                                    strokeWidth="1"
+                                  />
+                                </g>
                               </>
                             )
                           } else {
@@ -1676,34 +1711,39 @@ function App() {
                             return (
                               <>
                                 <defs>
+                                  <clipPath id={clipPathId}>
+                                    <rect x="0" y="0" width={pattern.width} height={pattern.height} />
+                                  </clipPath>
                                   <mask id="adf-annulus-mask">
                                     <rect width="100%" height="100%" fill="white" />
                                     <circle cx={centerX} cy={centerY} r={adfInner} fill="black" />
                                   </mask>
                                 </defs>
-                                <circle
-                                  cx={centerX}
-                                  cy={centerY}
-                                  r={adfOuter}
-                                  fill={colors.fill}
-                                  mask="url(#adf-annulus-mask)"
-                                />
-                                <circle
-                                  cx={centerX}
-                                  cy={centerY}
-                                  r={adfOuter}
-                                  fill="none"
-                                  stroke={colors.stroke}
-                                  strokeWidth="1"
-                                />
-                                <circle
-                                  cx={centerX}
-                                  cy={centerY}
-                                  r={adfInner}
-                                  fill="none"
-                                  stroke={colors.stroke}
-                                  strokeWidth="1"
-                                />
+                                <g clipPath={`url(#${clipPathId})`}>
+                                  <circle
+                                    cx={centerX}
+                                    cy={centerY}
+                                    r={adfOuter}
+                                    fill={colors.fill}
+                                    mask="url(#adf-annulus-mask)"
+                                  />
+                                  <circle
+                                    cx={centerX}
+                                    cy={centerY}
+                                    r={adfOuter}
+                                    fill="none"
+                                    stroke={colors.stroke}
+                                    strokeWidth="1"
+                                  />
+                                  <circle
+                                    cx={centerX}
+                                    cy={centerY}
+                                    r={adfInner}
+                                    fill="none"
+                                    stroke={colors.stroke}
+                                    strokeWidth="1"
+                                  />
+                                </g>
                               </>
                             )
                           }
@@ -1731,7 +1771,7 @@ function App() {
                     </span>
                   ) : (
                     <span className="workflow-summary-text">
-                      Atom Detection: {atomDetectionResult ?? 'Not run'}
+                      Disk Detection: Click to launch workflow
                     </span>
                   )}
                 </div>
@@ -1744,10 +1784,10 @@ function App() {
                     Virtual Detector
                   </button>
                   <button
-                    className={`workflow-tab ${workflowTab === 'atom-detection' ? 'active' : ''}`}
-                    onClick={() => setWorkflowTab('atom-detection')}
+                    className={`workflow-tab ${workflowTab === 'disk-detection' ? 'active' : ''}`}
+                    onClick={() => setWorkflowTab('disk-detection')}
                   >
-                    Atom Detection
+                    Disk Detection
                   </button>
                 </div>
               )}
@@ -1867,74 +1907,23 @@ function App() {
                     </div>
                   </div>
                 ) : (
-                  <div className="workflow-tab-content atom-detection-content">
-                    <div className="atom-detection-controls">
-                      <div className="atom-control">
-                        <label className="atom-control-label">Threshold</label>
-                        <input
-                          type="range"
-                          min="0"
-                          max="1"
-                          step="0.01"
-                          value={atomThreshold}
-                          onChange={(e) => setAtomThreshold(Number(e.target.value))}
-                          className="slider"
-                        />
-                        <span className="atom-control-value">{atomThreshold.toFixed(2)}</span>
-                      </div>
-                      <div className="atom-control">
-                        <label className="atom-control-label">Min distance</label>
-                        <input
-                          type="range"
-                          min="1"
-                          max="20"
-                          step="1"
-                          value={atomMinDistance}
-                          onChange={(e) => setAtomMinDistance(Number(e.target.value))}
-                          className="slider"
-                        />
-                        <span className="atom-control-value">{atomMinDistance}px</span>
-                      </div>
-                      <div className="atom-control">
-                        <label className="checkbox-label">
-                          <input
-                            type="checkbox"
-                            checked={atomGaussianRefinement}
-                            onChange={(e) => setAtomGaussianRefinement(e.target.checked)}
-                          />
-                          Gaussian refinement
-                        </label>
-                      </div>
-                    </div>
-                    <div className="atom-detection-actions">
+                  <div className="workflow-tab-content disk-detection-content">
+                    <div className="disk-detection-launch">
+                      <p className="disk-detection-description">
+                        Disk detection requires a dedicated workflow window with more screen space for template setup and parameter tuning.
+                      </p>
                       <button
-                        className="atom-run-button"
-                        onClick={handleRunAtomDetection}
-                        disabled={atomDetectionLoading || !virtualImage}
+                        className="launch-workflow-button"
+                        onClick={() => {
+                          window.electronAPI.openWorkflowWindow('disk-detection')
+                        }}
+                        disabled={!datasetInfo}
                       >
-                        {atomDetectionLoading ? (
-                          <span className="loading-spinner" />
-                        ) : (
-                          'Run'
-                        )}
+                        Launch Disk Detection
                       </button>
-                      <button
-                        className={`atom-toggle-button ${showAtomOverlay ? 'active' : ''}`}
-                        onClick={() => setShowAtomOverlay(!showAtomOverlay)}
-                        disabled={atomPositions.length === 0}
-                      >
-                        {showAtomOverlay ? 'Hide Overlay' : 'Show Overlay'}
-                      </button>
-                      <button
-                        className="atom-export-button"
-                        onClick={handleExportCsv}
-                        disabled={atomPositions.length === 0}
-                      >
-                        Export CSV
-                      </button>
-                      <span className={`atom-results ${atomDetectionError ? 'error' : ''}`}>
-                        Results: {atomDetectionError ?? atomDetectionResult ?? '—'}
-                      </span>
+                      {!datasetInfo && (
+                        <p className="disk-detection-warning">Load a dataset first to enable disk detection.</p>
+                      )}
                     </div>
                   </div>
                 )}
@@ -1963,56 +1952,6 @@ function App() {
         onCancel={handlePickerCancel}
       />
 
-      {/* Filter Hot Pixels Dialog */}
-      {showFilterHotPixelsDialog && (
-        <div className="modal-overlay">
-          <div className="modal-dialog filter-hot-pixels-dialog">
-            <h3 className="modal-title">Filter Hot Pixels</h3>
-            <p className="modal-description">
-              Remove anomalously bright pixels from the dataset.
-              Pixels more than N standard deviations above the mean will be filtered.
-            </p>
-            <div className="modal-form">
-              <label className="modal-label">
-                Threshold (σ)
-                <input
-                  type="number"
-                  className="modal-input"
-                  value={filterHotPixelsThresh}
-                  onChange={(e) => setFilterHotPixelsThresh(Number(e.target.value))}
-                  min={1}
-                  max={20}
-                  step={0.5}
-                  disabled={filterHotPixelsLoading}
-                />
-              </label>
-            </div>
-            <div className="modal-actions">
-              <button
-                className="modal-button modal-button-secondary"
-                onClick={() => setShowFilterHotPixelsDialog(false)}
-                disabled={filterHotPixelsLoading}
-              >
-                Cancel
-              </button>
-              <button
-                className="modal-button modal-button-primary"
-                onClick={handleFilterHotPixels}
-                disabled={filterHotPixelsLoading}
-              >
-                {filterHotPixelsLoading ? (
-                  <>
-                    <span className="loading-spinner" />
-                    Filtering...
-                  </>
-                ) : (
-                  'Apply'
-                )}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
     </div>
   )
 }

@@ -1,4 +1,5 @@
 import { defineConfig } from 'vite'
+import { resolve } from 'path'
 import react from '@vitejs/plugin-react'
 import electron from 'vite-plugin-electron'
 import renderer from 'vite-plugin-electron-renderer'
@@ -19,4 +20,12 @@ export default defineConfig({
     ]),
     renderer(),
   ],
+  build: {
+    rollupOptions: {
+      input: {
+        main: resolve(__dirname, 'index.html'),
+        workflow: resolve(__dirname, 'workflow.html'),
+      },
+    },
+  },
 })

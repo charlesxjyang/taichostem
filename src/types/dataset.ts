@@ -10,6 +10,18 @@ export interface HDF5DatasetInfo {
   is_4d: boolean
 }
 
+/** A node in the HDF5 file tree (group or dataset). */
+export interface HDF5TreeNode {
+  name: string
+  type: 'group' | 'dataset'
+  path: string
+  children?: HDF5TreeNode[]
+  // Dataset-specific fields (only present when type === 'dataset')
+  shape?: number[]
+  dtype?: string
+  is_4d?: boolean
+}
+
 /** Response for single-datacube files (.dm4, .mrc). */
 export interface SingleProbeResponse {
   type: 'single'
@@ -17,9 +29,12 @@ export interface SingleProbeResponse {
   dtype: string
 }
 
-/** Response for HDF5 files with a tree structure. */
+/** Response for HDF5 files with a hierarchical tree structure. */
 export interface HDF5TreeProbeResponse {
   type: 'hdf5_tree'
+  filename: string
+  root: HDF5TreeNode
+  /** Flat list for backwards compatibility */
   datasets: HDF5DatasetInfo[]
 }
 
@@ -91,4 +106,22 @@ export interface RegionDiffractionResponse {
   mode: string
   region_type: string
   pixels_in_region: number
+}
+
+/** Response from the extract template endpoint. */
+export interface ExtractTemplateResponse {
+  template_base64: string
+  width: number
+  height: number
+}
+
+/** Response from the auto-detect template endpoint. */
+export interface AutoDetectTemplateResponse {
+  template_base64: string
+  width: number
+  height: number
+  x1: number
+  y1: number
+  x2: number
+  y2: number
 }
