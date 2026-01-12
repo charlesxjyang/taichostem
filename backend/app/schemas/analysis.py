@@ -122,11 +122,14 @@ class ProbeStatusResponse(BaseModel):
 
 
 class GenerateKernelRequest(BaseModel):
-    """Request model for generating cross-correlation kernel."""
+    """Request model for generating cross-correlation kernel.
+    
+    Uses py4DSTEM's Probe.get_kernel() method for robust kernel generation.
+    """
 
     kernel_type: str = "sigmoid"  # "sigmoid", "gaussian", or "raw"
-    radial_boundary: float = 0.5  # Fraction of probe radius for sigmoid transition
-    sigmoid_width: float = 0.1  # Width of sigmoid transition (fraction of radius)
+    radial_boundary: float = 1.0  # Inner radius multiplier (inner = alpha * radial_boundary)
+    sigmoid_width: float = 2.0    # Outer radius multiplier (outer = alpha * sigmoid_width)
 
 
 class GenerateKernelResponse(BaseModel):

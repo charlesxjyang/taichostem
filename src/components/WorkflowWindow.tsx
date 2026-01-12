@@ -66,8 +66,8 @@ export function WorkflowWindow() {
 
   // Step 2: Kernel Generation state
   const [kernelType, setKernelType] = useState<KernelType>('sigmoid')
-  const [radialBoundary, setRadialBoundary] = useState(0.5)
-  const [sigmoidWidth, setSigmoidWidth] = useState(0.1)
+  const [radialBoundary, setRadialBoundary] = useState(1.0)
+  const [sigmoidWidth, setSigmoidWidth] = useState(2.0)
   const [kernelInfo, setKernelInfo] = useState<KernelInfo | null>(null)
   const [isGeneratingKernel, setIsGeneratingKernel] = useState(false)
   const [kernelConfirmed, setKernelConfirmed] = useState(false)
@@ -714,35 +714,35 @@ export function WorkflowWindow() {
                       {kernelType === 'sigmoid' && (
                         <>
                           <div className="parameter-row">
-                            <label className="parameter-label">Radial Boundary:</label>
+                            <label className="parameter-label">Inner Radius:</label>
                             <div className="parameter-slider-group">
                               <input
                                 type="range"
                                 className="parameter-slider"
-                                min="0.1"
-                                max="0.9"
-                                step="0.05"
+                                min="0.5"
+                                max="1.5"
+                                step="0.1"
                                 value={radialBoundary}
                                 onChange={(e) => setRadialBoundary(parseFloat(e.target.value))}
                                 disabled={kernelConfirmed}
                               />
-                              <span className="parameter-value">{radialBoundary.toFixed(2)}</span>
+                              <span className="parameter-value">{radialBoundary.toFixed(1)}α</span>
                             </div>
                           </div>
                           <div className="parameter-row">
-                            <label className="parameter-label">Sigmoid Width:</label>
+                            <label className="parameter-label">Outer Radius:</label>
                             <div className="parameter-slider-group">
                               <input
                                 type="range"
                                 className="parameter-slider"
-                                min="0.02"
-                                max="0.3"
-                                step="0.02"
+                                min="1.5"
+                                max="3.0"
+                                step="0.1"
                                 value={sigmoidWidth}
                                 onChange={(e) => setSigmoidWidth(parseFloat(e.target.value))}
                                 disabled={kernelConfirmed}
                               />
-                              <span className="parameter-value">{sigmoidWidth.toFixed(2)}</span>
+                              <span className="parameter-value">{sigmoidWidth.toFixed(1)}α</span>
                             </div>
                           </div>
                         </>
@@ -751,22 +751,22 @@ export function WorkflowWindow() {
                       <div className="kernel-info-box">
                         {kernelType === 'sigmoid' && (
                           <p className="info-text">
-                            <strong>Sigmoid kernel</strong> emphasizes the edges of the Bragg disk.
-                            Radial boundary controls where the transition occurs (fraction of estimated probe radius).
-                            Sigmoid width controls the sharpness of the transition.
+                            <strong>Sigmoid kernel</strong> creates a trench around the probe to emphasize Bragg disk edges.
+                            Inner radius (default 1.0α) and outer radius (default 2.0α) define the annular region,
+                            where α is the convergence semi-angle measured from the probe.
                           </p>
                         )}
                         {kernelType === 'gaussian' && (
                           <p className="info-text">
-                            <strong>Gaussian kernel</strong> subtracts a smoothed version of the probe,
-                            similar to py4DSTEM's <code>get_probe_kernel_subtrgaussian</code>.
+                            <strong>Gaussian kernel</strong> subtracts a smoothed version of the probe
+                            using py4DSTEM's proven implementation.
                             This enhances edges while maintaining the overall disk shape.
                           </p>
                         )}
                         {kernelType === 'raw' && (
                           <p className="info-text">
-                            <strong>Raw kernel</strong> uses the probe directly as the correlation template
-                            with zero-mean normalization. Best when the probe has clear, sharp edges.
+                            <strong>Raw kernel</strong> uses py4DSTEM's flat mode with normalization and shifting.
+                            Best when the probe has clear, sharp edges.
                           </p>
                         )}
                       </div>
