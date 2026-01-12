@@ -1957,7 +1957,7 @@ async def set_probe_template(request: SetProbeRequest) -> SetProbeResponse:
 
     # Extract vacuum probe using py4DSTEM's method
     try:
-        probe = datacube.get_vacuum_probe(ROI=mask, plot=False, returncalc=True)
+        probe = datacube.get_vacuum_probe(ROI=mask, returncalc=True)
         _probe_object = probe
     except Exception as e:
         raise HTTPException(
