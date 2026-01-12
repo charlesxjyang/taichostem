@@ -2590,11 +2590,9 @@ html, body, #root {
   gap: 24px;
   max-width: 600px;
   margin: 0 auto;
-  overflow-y: auto;
-  padding-right: 8px;
 }
 
-/* Override overflow for template step to allow scrolling */
+/* Override overflow for template step to allow scrolling from anywhere */
 .workflow-step-content.template-step {
   overflow-y: auto;
 }
