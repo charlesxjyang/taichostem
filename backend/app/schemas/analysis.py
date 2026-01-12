@@ -125,8 +125,8 @@ class GenerateKernelRequest(BaseModel):
     """Request model for generating cross-correlation kernel."""
 
     kernel_type: str = "sigmoid"  # "sigmoid", "gaussian", or "raw"
-    radial_boundary: float = 0.5  # Fraction of probe radius for sigmoid transition
-    sigmoid_width: float = 0.1  # Width of sigmoid transition (fraction of radius)
+    radial_boundary: float = 1.0  # Inner radius multiplier (1.0 = alpha)
+    sigmoid_width: float = 2.0  # Outer radius multiplier (2.0 = 2*alpha)
 
 
 class GenerateKernelResponse(BaseModel):
