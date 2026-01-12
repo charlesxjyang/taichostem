@@ -701,18 +701,29 @@ async def generate_kernel(request: GenerateKernelRequest) -> GenerateKernelRespo
 
     # Create line profile visualization
     try:
-        kernel_size = min(kernel.shape)
-        R = kernel_size // 2 - 2
-
-        fig, ax = plt.subplots(figsize=(3.5, 3.5))
-        py4DSTEM.visualize.show_kernel(
-            kernel,
-            R=R,
-            L=R,
-            W=1,
-            figax=(fig, ax),
-            returnfig=False,
-        )
+        # Fixed R value as specified
+        R = 25
+        
+        # Get kernel center
+        cy, cx = kernel.shape[0] // 2, kernel.shape[1] // 2
+        
+        # Extract kernel region
+        im_kernel = kernel[cy-R:cy+R, cx-R:cx+R]
+        
+        # Create two-panel figure
+        fig, axs = plt.subplots(1, 2, figsize=(7, 3.5))
+        
+        # Left panel: 2D kernel visualization with crosshairs
+        axs[0].matshow(im_kernel, cmap="gray")
+        axs[0].plot(np.ones(2 * R) * R, np.arange(2 * R), c="r")  # Red vertical crosshair
+        axs[0].plot(np.arange(2 * R), np.ones(2 * R) * R, c="c")  # Cyan horizontal crosshair
+        
+        # Right panel: Line profile plots
+        lineprofile_1 = im_kernel[:, R]  # Vertical profile (y-axis)
+        lineprofile_2 = im_kernel[R, :]  # Horizontal profile (x-axis)
+        axs[1].plot(np.arange(len(lineprofile_1)), lineprofile_1, c="r")  # Red line
+        axs[1].plot(np.arange(len(lineprofile_2)), lineprofile_2, c="c")  # Cyan line
+        
         plt.tight_layout()
 
         buffer = io.BytesIO()
