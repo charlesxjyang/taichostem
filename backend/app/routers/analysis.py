@@ -682,23 +682,6 @@ async def generate_kernel(request: GenerateKernelRequest) -> GenerateKernelRespo
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    # Create kernel diffraction space image (50x50 display)
-    kernel_display = kernel.copy()
-    kernel_min = kernel_display.min()
-    kernel_max = kernel_display.max()
-    if kernel_max > kernel_min:
-        kernel_display = ((kernel_display - kernel_min) / (kernel_max - kernel_min) * 255).astype(
-            np.uint8
-        )
-    else:
-        kernel_display = np.zeros_like(kernel_display, dtype=np.uint8)
-
-    kernel_image = Image.fromarray(kernel_display, mode="L")
-    kernel_image = kernel_image.resize((50, 50), Image.Resampling.LANCZOS)
-    buffer = io.BytesIO()
-    kernel_image.save(buffer, format="PNG")
-    preview_base64 = base64.b64encode(buffer.getvalue()).decode("utf-8")
-
     # Create line profile visualization
     try:
         # Fixed R value as specified
@@ -736,7 +719,7 @@ async def generate_kernel(request: GenerateKernelRequest) -> GenerateKernelRespo
         lineprofile_base64 = None
 
     return GenerateKernelResponse(
-        kernel_preview=preview_base64,
+        kernel_preview=None,  # Preview removed
         kernel_lineprofile=lineprofile_base64,
         kernel_shape=list(kernel.shape),
         kernel_type=request.kernel_type,
