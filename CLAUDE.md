@@ -4,54 +4,8 @@
 
 Enterprise-grade visualization and analysis software for 4D-STEM microscopy data, analogous to what cryoSPARC is for cryo-EM. This is a prototype/MVP phase focusing on core workflows and user experience validation.
 
-### Target Users
-- Academic researchers (primary, initial audience)
-- Facility managers at electron microscopy centers
-- Eventually: industry R&D labs
-
-### Key Design Decisions
-
-| Decision | Choice | Rationale |
-|----------|--------|-----------|
-| Desktop vs Web | Desktop app | 4D-STEM datasets are too large (1GB+) to stream; compute must stay close to data |
-| Frontend framework | Electron | Larger talent pool than Tauri, acceptable memory overhead for prototype, can migrate later if needed |
-| Backend | Python (FastAPI subprocess) | Native ecosystem for 4D-STEM (py4DSTEM, ptyrad, hyperspy); do NOT use numpy if py4DSTEM or other 4D STEM native open source packages have modules available |
-| IPC | HTTP to localhost | FastAPI on 127.0.0.1, simple and debuggable |
-
-### Future Considerations
-- May evolve to cryoSPARC-style local web server for multi-user/cluster deployment
-- Tauri migration possible if memory footprint becomes problematic
-- Job queuing (Celery/Redis) for long-running reconstructions
-
----
-
-## Architecture
-
-```
-┌─────────────────────────────────────────────────────┐
-│                    Electron App                      │
-│  ┌───────────────────────────────────────────────┐  │
-│  │  Renderer Process (Frontend)                  │  │
-│  │  - React + TypeScript                         │  │
-│  │  - WebGL for visualization                    │  │
-│  │  - Dataset browser, workflow builder          │  │
-│  └──────────────────┬────────────────────────────┘  │
-│                     │ HTTP (localhost:8000)          │
-│  ┌──────────────────▼────────────────────────────┐  │
-│  │  Python Backend (subprocess)                  │  │
-│  │  - FastAPI server                             │  │
-│  │  - py4DSTEM, ptyrad, hyperspy                 │  │
-│  │  - Dask for out-of-core processing            │  │
-│  │  - Serves slices/projections, not full data   │  │
-│  └───────────────────────────────────────────────┘  │
-└─────────────────────────────────────────────────────┘
-```
-
-### Data Flow Principles
-- **Never load full dataset into memory** - use memory-mapped access (Dask, Zarr)
-- **Server-side slicing** - frontend requests specific frames/projections
-- **Lazy computation** - defer processing until results are needed
-- **Thumbnail/preview pipeline** - fast low-res previews, full-res on demand
+We are using py4dstem for our backend. Reference their code at: backend/venv/lib/python3.11/site-packages/py4DSTEM
+Use py4dstem over scipy or numpy wherever possible
 
 ---
 
@@ -107,13 +61,6 @@ This is enterprise-grade software. Every feature needs:
    - Document significant technical decisions
    - Include context, options considered, rationale
 
-### Git Practices
-
-- **Conventional commits**: `feat:`, `fix:`, `docs:`, `refactor:`, `test:`
-- **Feature branches**: `feature/virtual-detector`, `fix/memory-leak`
-- **PR descriptions**: Include what, why, and how to test
-- **No large files in git**: Data files go in `.gitignore`
-
 ### Testing
 
 - **Backend**: pytest with fixtures for sample data
@@ -121,40 +68,6 @@ This is enterprise-grade software. Every feature needs:
 - **E2E**: Playwright for critical workflows
 - **Performance benchmarks**: Track memory/time for key operations
 
----
-
-## Project Structure
-
-```
-4dstem-viewer/
-├── CLAUDE.md                 # This file
-├── README.md                 # User-facing documentation
-├── package.json              # Electron/frontend dependencies
-├── electron/
-│   ├── main.ts               # Electron main process
-│   ├── preload.ts            # Preload scripts for IPC
-│   └── python.ts             # Python subprocess management
-├── src/                      # React frontend
-│   ├── components/
-│   ├── hooks/
-│   ├── services/             # API client
-│   └── types/
-├── backend/                  # Python backend
-│   ├── pyproject.toml
-│   ├── app/
-│   │   ├── main.py           # FastAPI app
-│   │   ├── routers/
-│   │   ├── services/         # Business logic
-│   │   └── schemas/          # Pydantic models
-│   └── tests/
-├── data/                     # Gitignored, local datasets
-│   └── demo/
-├── docs/
-│   ├── adr/                  # Architecture decision records
-│   ├── api/                  # API documentation
-│   └── user/                 # User guides
-└── scripts/                  # Build, dev, utility scripts
-```
 
 ---
 
@@ -176,42 +89,10 @@ cd backend && pytest     # Backend tests
 # Build
 npm run build            # Production build
 ```
-
----
-
-## Key Libraries
-
-### Python Backend
-- **FastAPI** - API framework
-- **py4DSTEM** - 4D-STEM analysis
-- **ptyrad** / **pyptyRAD** - Ptychography
-- **hyperspy** - Multi-dimensional data
-- **Dask** - Out-of-core computation
-- **Zarr** - Chunked array storage
-- **numpy**, **scipy** - Numerical computing
-
-### Frontend
-- **React** - UI framework
-- **TypeScript** - Type safety
-- **Vite** - Build tool
-- **WebGL** / **Three.js** or **regl** - Visualization
-- **TanStack Query** - API state management
-- **Zustand** - UI state management
-
 ---
 
 ## Claude Code Guidelines
 
-### When implementing features:
-1. Check this file for architectural context
-2. Follow the documentation standards above
-3. Test against the 1GB demo dataset
-4. Keep memory efficiency in mind
-
-### When asked to "just make it work":
-- Still add basic type hints and docstrings
-- Still handle errors gracefully
-- Note any technical debt with `// TODO:` comments
 
 ### When refactoring:
 - Preserve existing API contracts
@@ -229,25 +110,6 @@ grep -r "load\|read\|open" backend/app/
 # Find TODOs
 grep -r "TODO\|FIXME\|HACK" --include="*.py" --include="*.ts"
 ```
-
----
-
-## Current Status
-
-**Phase: Prototype / MVP**
-
-### Immediate priorities:
-1. [ ] Scaffold Electron + React + FastAPI project
-2. [ ] Load and display 4D-STEM dataset (single frame)
-3. [ ] Virtual detector placement UI
-4. [ ] Basic ptychography workflow
-
-### Not yet in scope:
-- Multi-user support
-- Cluster job scheduling
-- Plugin system
-- Advanced reconstruction algorithms
-
 ---
 
 ## Contacts & Resources
