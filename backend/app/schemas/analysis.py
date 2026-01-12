@@ -132,7 +132,7 @@ class GenerateKernelRequest(BaseModel):
 class GenerateKernelResponse(BaseModel):
     """Response model for generated kernel."""
 
-    kernel_preview: str  # 50x50 grayscale kernel image
+    kernel_preview: str | None  # Removed - field kept for backward compatibility
     kernel_lineprofile: str | None  # py4DSTEM show_kernel visualization
     kernel_shape: list[int]
     kernel_type: str
