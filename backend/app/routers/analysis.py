@@ -591,8 +591,9 @@ async def generate_kernel(request: GenerateKernelRequest) -> GenerateKernelRespo
             radii=(inner_radius, outer_radius)
         )
     elif request.kernel_type == "gaussian":
-        # py4DSTEM's gaussian mode
-        kernel = probe.get_kernel(mode='gaussian')
+        # py4DSTEM's gaussian mode - estimate sigma from probe size
+        sigma = min(probe_template.shape) / 8
+        kernel = probe.get_kernel(mode='gaussian', sigma=sigma)
     else:
         # Raw mode
         kernel = probe.get_kernel(mode='flat')
