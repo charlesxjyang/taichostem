@@ -682,9 +682,6 @@ async def generate_kernel(request: GenerateKernelRequest) -> GenerateKernelRespo
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    # Set preview to None (50x50 kernel diffraction preview removed)
-    preview_base64 = None
-
     # Create line profile visualization
     try:
         # Fixed R value as specified
@@ -722,7 +719,7 @@ async def generate_kernel(request: GenerateKernelRequest) -> GenerateKernelRespo
         lineprofile_base64 = None
 
     return GenerateKernelResponse(
-        kernel_preview=preview_base64,
+        kernel_preview=None,  # Preview removed
         kernel_lineprofile=lineprofile_base64,
         kernel_shape=list(kernel.shape),
         kernel_type=request.kernel_type,
