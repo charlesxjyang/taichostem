@@ -20,7 +20,7 @@ interface ProbeTemplateInfo {
 }
 
 interface KernelInfo {
-  kernel_preview: string
+  kernel_preview: string | null
   kernel_lineprofile: string | null
   kernel_shape: number[]
   kernel_type: string
@@ -653,28 +653,8 @@ export function WorkflowWindow() {
                     <h3 className="column-title">Cross-Correlation Kernel</h3>
                   </div>
                   <div className="column-content">
-                    {/* Kernel previews - image and line profile */}
+                    {/* Kernel line profile visualization */}
                     <div className="kernel-previews-row">
-                      {/* Kernel diffraction image */}
-                      <div className="kernel-image-container kernel-diffraction">
-                        {isGeneratingKernel ? (
-                          <div className="status-loading">
-                            <span className="loading-spinner" />
-                            <span>Generating...</span>
-                          </div>
-                        ) : kernelInfo ? (
-                          <img
-                            className="kernel-preview-image"
-                            src={`data:image/png;base64,${kernelInfo.kernel_preview}`}
-                            alt="Kernel diffraction"
-                          />
-                        ) : (
-                          <div className="panel-empty">
-                            <p>No kernel</p>
-                          </div>
-                        )}
-                      </div>
-
                       {/* Kernel line profile from py4DSTEM */}
                       <div className="kernel-image-container kernel-lineprofile">
                         {isGeneratingKernel ? (
