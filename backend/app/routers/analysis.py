@@ -596,7 +596,9 @@ async def generate_kernel(request: GenerateKernelRequest) -> GenerateKernelRespo
             # Fallback if alpha not calibrated
             raise HTTPException(
                 status_code=400,
-                detail="Probe not calibrated. Alpha parameter required for sigmoid kernel. Try using gaussian or raw kernel instead.",
+                detail="Probe not calibrated. The sigmoid kernel requires the convergence semi-angle (alpha) parameter. "
+                       "Alpha is automatically measured when you set the probe template. Try using a different kernel type "
+                       "(gaussian or raw) or re-extract the probe template from a vacuum region.",
             )
             
     elif request.kernel_type == "gaussian":
