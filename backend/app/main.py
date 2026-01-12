@@ -43,6 +43,11 @@ _calibration: dict[str, float | str] = {
 # Probe template for disk detection (from vacuum region)
 _probe_template: np.ndarray | None = None
 _probe_template_position: tuple[int, int] | None = None
+# py4DSTEM Probe object and parameters
+_probe_object: py4DSTEM.Probe | None = None  # py4DSTEM Probe object
+_probe_alpha: float | None = None  # Probe convergence semi-angle (radius)
+_probe_qx0: float | None = None  # Probe center x-coordinate
+_probe_qy0: float | None = None  # Probe center y-coordinate
 # Cross-correlation kernel generated from probe template
 _correlation_kernel: np.ndarray | None = None
 _kernel_type: str | None = None
@@ -1290,6 +1295,9 @@ class SetProbeResponse(BaseModel):
     position: list[int] | None  # [x, y] for point selection
     source_type: str  # "point" or "region"
     pixels_averaged: int  # 1 for point, N for region
+    alpha: float  # Probe convergence semi-angle (radius) in pixels
+    qx0: float  # Probe center x-coordinate in pixels
+    qy0: float  # Probe center y-coordinate in pixels
 
 
 class ProbeStatusResponse(BaseModel):
@@ -1299,6 +1307,9 @@ class ProbeStatusResponse(BaseModel):
     shape: list[int] | None = None
     max_intensity: float | None = None
     position: list[int] | None = None
+    alpha: float | None = None  # Probe convergence semi-angle
+    qx0: float | None = None  # Probe center x
+    qy0: float | None = None  # Probe center y
 
 
 class GenerateKernelRequest(BaseModel):
@@ -1837,11 +1848,11 @@ async def auto_detect_template() -> AutoDetectTemplateResponse:
 @app.post("/analysis/disk-detection/set-probe", response_model=SetProbeResponse)
 async def set_probe_template(request: SetProbeRequest) -> SetProbeResponse:
     """
-    Set the probe template by extracting diffraction pattern(s) from a scan position or region.
+    Set the probe template by extracting vacuum probe from a scan position or region.
 
-    The user should select a vacuum region (no sample) to get a clean probe shape
-    for subsequent disk correlation. Using a region selection averages over multiple
-    positions, reducing noise and producing a better template.
+    Uses py4DSTEM's get_vacuum_probe() method to properly extract and calibrate
+    the probe. The user should select a vacuum region (no sample) to get a clean
+    probe shape for subsequent disk correlation.
 
     Parameters
     ----------
@@ -1858,7 +1869,7 @@ async def set_probe_template(request: SetProbeRequest) -> SetProbeResponse:
         max_intensity : float
             Maximum intensity value in the probe.
         center_x, center_y : float
-            Estimated center of mass of the probe.
+            Measured center of the probe (from get_probe_size).
         preview : str
             Base64-encoded PNG preview of the probe.
         position : list[int] | None
@@ -1866,7 +1877,11 @@ async def set_probe_template(request: SetProbeRequest) -> SetProbeResponse:
         source_type : str
             "point" or "region" depending on selection mode.
         pixels_averaged : int
-            Number of scan positions averaged (1 for point).
+            Number of scan positions averaged.
+        alpha : float
+            Probe convergence semi-angle (radius) in pixels.
+        qx0, qy0 : float
+            Probe center coordinates in pixels.
 
     Raises
     ------
@@ -1874,6 +1889,7 @@ async def set_probe_template(request: SetProbeRequest) -> SetProbeResponse:
         400 if no dataset is loaded, coordinates/region are invalid, or no selection provided.
     """
     global _probe_template, _probe_template_position
+    global _probe_object, _probe_alpha, _probe_qx0, _probe_qy0
 
     if _current_dataset is None:
         raise HTTPException(
@@ -1903,9 +1919,12 @@ async def set_probe_template(request: SetProbeRequest) -> SetProbeResponse:
             detail="Must provide either (x, y) coordinates or (region_type, points) for selection.",
         )
 
-    # Process based on selection mode
+    # Create py4DSTEM DataCube
+    datacube = py4DSTEM.DataCube(data=_current_dataset)
+
+    # Create ROI mask based on selection mode
     if has_region:
-        # Region selection: average diffraction patterns over the region
+        # Region selection: create boolean mask
         mask = _create_region_mask(request.region_type, request.points, (rx, ry))
         pixels_in_region = int(np.sum(mask))
 
@@ -1915,23 +1934,12 @@ async def set_probe_template(request: SetProbeRequest) -> SetProbeResponse:
                 detail="Selected region contains no pixels.",
             )
 
-        # Get indices where mask is True and average patterns
-        if _current_dataset.ndim == 4:
-            indices = np.argwhere(mask)
-            # Stack all patterns and compute mean
-            patterns = np.array([_current_dataset[i, j, :, :] for i, j in indices])
-            probe = np.mean(patterns, axis=0)
-        else:
-            indices = np.argwhere(mask[:, 0])
-            patterns = np.array([_current_dataset[i, :, :] for i in indices.flatten()])
-            probe = np.mean(patterns, axis=0)
-
         source_type = "region"
         position = None
         pixels_averaged = pixels_in_region
         _probe_template_position = None
     else:
-        # Point selection: extract single diffraction pattern
+        # Point selection: create single-pixel mask
         if request.x < 0 or request.x >= rx or request.y < 0 or request.y >= ry:
             raise HTTPException(
                 status_code=400,
@@ -1939,51 +1947,63 @@ async def set_probe_template(request: SetProbeRequest) -> SetProbeResponse:
                 f"Valid range: x=[0, {rx-1}], y=[0, {ry-1}]",
             )
 
-        if _current_dataset.ndim == 4:
-            probe = _current_dataset[request.x, request.y, :, :].copy()
-        else:
-            probe = _current_dataset[request.x, :, :].copy()
+        mask = np.zeros((rx, ry), dtype=bool)
+        mask[request.x, request.y] = True
 
         source_type = "point"
         position = [request.x, request.y]
         pixels_averaged = 1
         _probe_template_position = (request.x, request.y)
 
-    # Store as probe template
-    _probe_template = probe.astype(np.float64)
+    # Extract vacuum probe using py4DSTEM's method
+    try:
+        probe = datacube.get_vacuum_probe(ROI=mask, plot=False, returncalc=True)
+        _probe_object = probe
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to extract vacuum probe: {str(e)}",
+        )
+
+    # Measure probe size and position using py4DSTEM's calibration method
+    try:
+        alpha_pr, qx0_pr, qy0_pr = py4DSTEM.process.calibration.get_probe_size(probe.probe)
+        _probe_alpha = float(alpha_pr)
+        _probe_qx0 = float(qx0_pr)
+        _probe_qy0 = float(qy0_pr)
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to measure probe size: {str(e)}",
+        )
+
+    # Store probe data as template
+    _probe_template = probe.probe.astype(np.float64)
 
     # Calculate probe statistics
-    max_intensity = float(np.max(probe))
-
-    # Calculate center of mass for probe center estimation
-    from scipy.ndimage import center_of_mass
-
-    # Normalize probe for center of mass calculation
-    probe_norm = probe.astype(np.float64)
-    probe_norm = probe_norm - probe_norm.min()
-    if probe_norm.max() > 0:
-        probe_norm = probe_norm / probe_norm.max()
-
-    cy, cx = center_of_mass(probe_norm)
-    if np.isnan(cx) or np.isnan(cy):
-        cx, cy = qy / 2, qx / 2
+    max_intensity = float(np.max(probe.probe))
 
     # Create preview image
-    normalized = _process_image_for_display(probe, log_scale=True, contrast_min=1, contrast_max=99)
+    normalized = _process_image_for_display(
+        probe.probe, log_scale=True, contrast_min=1, contrast_max=99
+    )
     image = Image.fromarray(normalized, mode="L")
     buffer = io.BytesIO()
     image.save(buffer, format="PNG")
     preview_base64 = base64.b64encode(buffer.getvalue()).decode("utf-8")
 
     return SetProbeResponse(
-        shape=[int(qx), int(qy)],
+        shape=list(probe.probe.shape),
         max_intensity=max_intensity,
-        center_x=float(cx),
-        center_y=float(cy),
+        center_x=float(qx0_pr),
+        center_y=float(qy0_pr),
         preview=preview_base64,
         position=position,
         source_type=source_type,
         pixels_averaged=pixels_averaged,
+        alpha=float(alpha_pr),
+        qx0=float(qx0_pr),
+        qy0=float(qy0_pr),
     )
 
 
@@ -2003,6 +2023,10 @@ async def get_probe_status() -> ProbeStatusResponse:
             Max intensity of the probe if set.
         position : list[int] | None
             Scan position where probe was extracted.
+        alpha : float | None
+            Probe convergence semi-angle (radius) in pixels.
+        qx0, qy0 : float | None
+            Probe center coordinates in pixels.
     """
     if _probe_template is None:
         return ProbeStatusResponse(is_set=False)
@@ -2012,6 +2036,9 @@ async def get_probe_status() -> ProbeStatusResponse:
         shape=list(_probe_template.shape),
         max_intensity=float(np.max(_probe_template)),
         position=list(_probe_template_position) if _probe_template_position else None,
+        alpha=_probe_alpha,
+        qx0=_probe_qx0,
+        qy0=_probe_qy0,
     )
 
 
@@ -2027,11 +2054,16 @@ async def clear_probe_template() -> dict[str, bool]:
             Always True if no error.
     """
     global _probe_template, _probe_template_position, _correlation_kernel, _kernel_type
+    global _probe_object, _probe_alpha, _probe_qx0, _probe_qy0
 
     _probe_template = None
     _probe_template_position = None
     _correlation_kernel = None
     _kernel_type = None
+    _probe_object = None
+    _probe_alpha = None
+    _probe_qx0 = None
+    _probe_qy0 = None
 
     return {"success": True}
 
