@@ -5,6 +5,7 @@ import io
 
 import numpy as np
 import py4DSTEM
+from py4DSTEM.braggvectors import Probe
 from fastapi import APIRouter, HTTPException
 from PIL import Image
 from scipy.ndimage import gaussian_filter, center_of_mass, label, maximum_filter
@@ -512,109 +513,19 @@ async def clear_probe_template_endpoint() -> dict[str, bool]:
     return {"success": True}
 
 
-def _generate_sigmoid_kernel(
-    probe: np.ndarray,
-    radial_boundary: float = 0.5,
-    sigmoid_width: float = 0.1,
-) -> np.ndarray:
-    """
-    Generate a sigmoid-filtered kernel from a probe template.
-
-    This creates a kernel optimized for cross-correlation disk detection
-    by applying a sigmoid filter that emphasizes the disk edges.
-
-    Parameters
-    ----------
-    probe : np.ndarray
-        The probe template (2D array).
-    radial_boundary : float
-        Fraction of probe radius where sigmoid transition occurs (0-1).
-    sigmoid_width : float
-        Width of sigmoid transition as fraction of radius.
-
-    Returns
-    -------
-    np.ndarray
-        The sigmoid-filtered kernel.
-    """
-    h, w = probe.shape
-    cy, cx = h / 2, w / 2
-
-    probe_norm = probe.astype(np.float64)
-    probe_norm = probe_norm - probe_norm.min()
-    if probe_norm.max() > 0:
-        probe_norm = probe_norm / probe_norm.max()
-
-    com_y, com_x = center_of_mass(probe_norm)
-    if np.isnan(com_x) or np.isnan(com_y):
-        com_x, com_y = cx, cy
-
-    threshold = 0.1
-    mask = probe_norm > threshold
-    if np.any(mask):
-        y_coords, x_coords = np.where(mask)
-        distances = np.sqrt((y_coords - com_y) ** 2 + (x_coords - com_x) ** 2)
-        estimated_radius = np.percentile(distances, 90)
-    else:
-        estimated_radius = min(h, w) / 4
-
-    y, x = np.ogrid[:h, :w]
-    r = np.sqrt((x - com_x) ** 2 + (y - com_y) ** 2)
-
-    r_boundary = radial_boundary * estimated_radius
-    r_width = max(sigmoid_width * estimated_radius, 1.0)
-
-    sigmoid_filter = 1.0 / (1.0 + np.exp((r - r_boundary) / r_width))
-    kernel = probe.astype(np.float64) * sigmoid_filter
-    kernel = kernel - kernel.mean()
-
-    kernel_std = kernel.std()
-    if kernel_std > 0:
-        kernel = kernel / kernel_std
-
-    return kernel
-
-
-def _generate_gaussian_kernel(probe: np.ndarray) -> np.ndarray:
-    """
-    Generate a Gaussian-filtered kernel from a probe template.
-
-    Subtracts a Gaussian-smoothed version of the probe to emphasize edges.
-
-    Parameters
-    ----------
-    probe : np.ndarray
-        The probe template (2D array).
-
-    Returns
-    -------
-    np.ndarray
-        The Gaussian-filtered kernel.
-    """
-    probe_float = probe.astype(np.float64)
-    sigma = min(probe.shape) / 8
-
-    smoothed = gaussian_filter(probe_float, sigma=sigma)
-    kernel = probe_float - smoothed
-    kernel = kernel - kernel.mean()
-
-    kernel_std = kernel.std()
-    if kernel_std > 0:
-        kernel = kernel / kernel_std
-
-    return kernel
-
-
 @router.post("/disk-detection/generate-kernel", response_model=GenerateKernelResponse)
 async def generate_kernel(request: GenerateKernelRequest) -> GenerateKernelResponse:
     """
-    Generate a cross-correlation kernel from the stored probe template.
+    Generate a cross-correlation kernel from the stored probe template using py4DSTEM.
+
+    Uses py4DSTEM's native Probe.get_kernel() method for proper kernel generation
+    with correct normalization and FFT-compatible formatting.
 
     The kernel is used for template matching to find Bragg disks.
     Different kernel types optimize for different detection scenarios:
     - sigmoid: Emphasizes disk edges with smooth transition (recommended)
     - gaussian: Subtracts Gaussian-smoothed probe to enhance edges
-    - raw: Uses probe directly (not recommended for noisy data)
+    - raw: Uses probe directly with proper normalization (flat mode)
 
     Parameters
     ----------
@@ -622,7 +533,7 @@ async def generate_kernel(request: GenerateKernelRequest) -> GenerateKernelRespo
         kernel_type : str
             Type of kernel: "sigmoid", "gaussian", or "raw".
         radial_boundary : float
-            For sigmoid kernel: fraction of probe radius for transition (0-1).
+            For sigmoid kernel: fraction of probe radius (alpha) for inner transition (0-1).
         sigmoid_width : float
             For sigmoid kernel: width of transition (fraction of radius).
 
@@ -645,6 +556,7 @@ async def generate_kernel(request: GenerateKernelRequest) -> GenerateKernelRespo
     HTTPException
         400 if no probe template is set.
         400 if invalid kernel type specified.
+        500 if kernel generation fails.
     """
     probe_template = get_probe_template()
     if probe_template is None:
@@ -659,20 +571,51 @@ async def generate_kernel(request: GenerateKernelRequest) -> GenerateKernelRespo
             detail=f"Invalid kernel type: {request.kernel_type}. Must be 'sigmoid', 'gaussian', or 'raw'.",
         )
 
-    if request.kernel_type == "sigmoid":
-        kernel = _generate_sigmoid_kernel(
-            probe_template,
-            radial_boundary=request.radial_boundary,
-            sigmoid_width=request.sigmoid_width,
+    # Create a Probe object from the probe template
+    probe_obj = Probe(data=probe_template)
+
+    # Generate kernel using py4DSTEM's native implementation
+    try:
+        if request.kernel_type == "sigmoid":
+            # Get the stored probe calibration (alpha is the convergence semi-angle)
+            alpha, qx0, qy0 = get_probe_calibration()
+            
+            if alpha is None:
+                # Fallback: estimate alpha from probe size if not calibrated
+                try:
+                    alpha, qx0, qy0 = py4DSTEM.process.calibration.get_probe_size(probe_template)
+                except Exception:
+                    # Final fallback: use a fraction of the probe size
+                    alpha = min(probe_template.shape) / 4
+            
+            # Compute inner and outer radii for sigmoid kernel
+            # radial_boundary determines the inner radius as a fraction of alpha
+            # sigmoid_width controls the transition width
+            inner_radius = request.radial_boundary * alpha
+            # Outer radius set to create a reasonable transition zone
+            outer_radius = inner_radius + (request.sigmoid_width * alpha * 10)
+            
+            kernel = probe_obj.get_kernel(
+                mode='sigmoid',
+                radii=(inner_radius, outer_radius)
+            )
+        elif request.kernel_type == "gaussian":
+            # For gaussian kernel, sigma is relative to probe size
+            # Using a reasonable default based on probe dimensions
+            sigma = min(probe_template.shape) / 8
+            
+            kernel = probe_obj.get_kernel(
+                mode='gaussian',
+                sigma=sigma
+            )
+        else:  # "raw" -> use "flat" mode in py4DSTEM
+            kernel = probe_obj.get_kernel(mode='flat')
+            
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to generate kernel using py4DSTEM: {str(e)}",
         )
-    elif request.kernel_type == "gaussian":
-        kernel = _generate_gaussian_kernel(probe_template)
-    else:
-        kernel = probe_template.astype(np.float64)
-        kernel = kernel - kernel.mean()
-        kernel_std = kernel.std()
-        if kernel_std > 0:
-            kernel = kernel / kernel_std
 
     set_correlation_kernel(kernel)
     set_kernel_type(request.kernel_type)
